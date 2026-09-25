@@ -347,13 +347,14 @@ def resolve_audio_prompt(language_id: str, provided_path: str | None) -> str | N
 
 def split_text_for_tts(text: str, max_chars: int = 250) -> list[str]:
     """
-    Divide el texto respetando las oraciones siempre que sea posible.
+    Divide el texto respetando las oraciones.
 
-    Prioridad:
-    1. Mantener las oraciones completas.
-    2. Mantener cada parte dentro de max_chars.
-    3. Si una oración supera max_chars, dividirla por palabras.
-    4. Nunca cortar una palabra.
+    Reglas:
+    1. Intenta mantener cada parte cerca de max_chars.
+    2. Nunca corta una oración normal.
+    3. Si una oración individual supera max_chars,
+       intenta dividirla por palabras.
+    4. Nunca corta una palabra.
     """
 
     text = text.strip()
@@ -372,7 +373,7 @@ def split_text_for_tts(text: str, max_chars: int = 250) -> list[str]:
         if not paragraph:
             continue
 
-        # Detectar oraciones terminadas en . ! ?
+        # Detectar oraciones completas.
         sentences = re.findall(
             r".+?(?:[.!?]+(?=\s|$)|$)",
             paragraph,
@@ -388,15 +389,15 @@ def split_text_for_tts(text: str, max_chars: int = 250) -> list[str]:
             if not sentence:
                 continue
 
-            # Si la oración sola supera el límite,
-            # primero guardamos lo que teníamos acumulado.
+            # Si la oración individual es demasiado larga,
+            # primero guardamos lo que ya teníamos.
             if len(sentence) > max_chars:
 
                 if current_chunk:
                     chunks.append(current_chunk.strip())
                     current_chunk = ""
 
-                # Dividir la oración larga por palabras.
+                # Dividir solamente esta oración larga por palabras.
                 words = sentence.split()
                 word_chunk = ""
 
@@ -425,7 +426,7 @@ def split_text_for_tts(text: str, max_chars: int = 250) -> list[str]:
 
                 continue
 
-            # Intentar agregar la oración al bloque actual.
+            # Intentar agregar la oración completa.
             candidate = (
                 f"{current_chunk} {sentence}"
             ).strip()
@@ -436,6 +437,9 @@ def split_text_for_tts(text: str, max_chars: int = 250) -> list[str]:
 
             else:
 
+                # No entra la oración completa.
+                # Guardamos la parte anterior y comenzamos
+                # una nueva parte con esta oración COMPLETA.
                 if current_chunk:
                     chunks.append(
                         current_chunk.strip()
@@ -449,6 +453,7 @@ def split_text_for_tts(text: str, max_chars: int = 250) -> list[str]:
             )
 
     return chunks
+    
     
 def regenerate_tts_part(
     paragraph_number,
@@ -906,7 +911,7 @@ with gr.Blocks() as demo:
 
             split_test_btn.click(
                 fn=test_split_text,
-                inputs=[text_input],
+                inputs=[text],
                 outputs=[split_test_output]
             )
 
