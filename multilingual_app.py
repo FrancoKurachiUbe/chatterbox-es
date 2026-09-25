@@ -633,168 +633,168 @@ with gr.Blocks() as demo:
     # Display supported languages
     gr.Markdown(get_supported_languages_display())
     
-with gr.Row():
-    with gr.Column():
-        initial_lang = "es"
+    with gr.Row():
+        with gr.Column():
+            initial_lang = "es"
 
-        saved_project = load_project()
+            saved_project = load_project()
 
-        initial_text = (
-            saved_project.get("last_script")
-            if saved_project and saved_project.get("last_script")
-            else default_text_for_ui(initial_lang)
+            initial_text = (
+                saved_project.get("last_script")
+                if saved_project and saved_project.get("last_script")
+                else default_text_for_ui(initial_lang)
+            )
+
+        text = gr.Textbox(
+            value=initial_text,
+            label="Text to synthesize (max chars 300)",
+            max_lines=5
         )
 
-    text = gr.Textbox(
-        value=initial_text,
-        label="Text to synthesize (max chars 300)",
-        max_lines=5
-    )
+        language_id = gr.Dropdown(
+            choices=list(
+                ChatterboxMultilingualTTS.get_supported_languages().keys()
+            ),
+            value=initial_lang,
+            label="Language",
+            info="Select the language for text-to-speech synthesis"
+        )
 
-    language_id = gr.Dropdown(
-        choices=list(
-            ChatterboxMultilingualTTS.get_supported_languages().keys()
-        ),
-        value=initial_lang,
-        label="Language",
-        info="Select the language for text-to-speech synthesis"
-    )
+        voice_choices = get_voice_choices()
+        preferred_voice = "Brian Warm Clonacion Voz"
 
-    voice_choices = get_voice_choices()
-    preferred_voice = "Brian Warm Clonacion Voz"
+        initial_voice = (
+            preferred_voice
+            if preferred_voice in voice_choices
+            else next(iter(voice_choices), None)
+        )
 
-    initial_voice = (
-        preferred_voice
-        if preferred_voice in voice_choices
-        else next(iter(voice_choices), None)
-    )
+        initial_ref = (
+            voice_choices.get(initial_voice)
+            if initial_voice
+            else default_audio_for_ui(initial_lang)
+        )
 
-    initial_ref = (
-        voice_choices.get(initial_voice)
-        if initial_voice
-        else default_audio_for_ui(initial_lang)
-    )
+        voice_dropdown = gr.Dropdown(
+            choices=list(voice_choices.keys()),
+            value=initial_voice,
+            label="Voice",
+            info="Select a voice from the voices folder"
+        )
 
-    voice_dropdown = gr.Dropdown(
-        choices=list(voice_choices.keys()),
-        value=initial_voice,
-        label="Voice",
-        info="Select a voice from the voices folder"
-    )
-
-    ref_wav = gr.Audio(
-        sources=["upload", "microphone"],
-        type="filepath",
-        label="Reference Audio File (Optional)",
-        value=initial_ref
-    )
-        
-    gr.Markdown(
-        " **Note**: Ensure that the reference clip matches the specified language tag. Otherwise, language transfer outputs may inherit the accent of the reference clip's language. To mitigate this, set the CFG weight to 0.",
-        elem_classes=["audio-note"]
-    )
-        
-    exaggeration = gr.Slider(
-        0.25,
-        2,
-        step=.05,
-        label="Exaggeration (Neutral = 0.5, extreme values can be unstable)",
-        value=0.35
-    )
-    
-    cfg_weight = gr.Slider(
-        0.2,
-        1,
-        step=.05,
-        label="CFG/Pace",
-        value=0.5
-    )
-
-    with gr.Accordion("More options", open=False):
-        seed_num = gr.Number(
-            value=737219296,
-            precision=0,
-            label="Seed"
-                )
-        
-        temp = gr.Slider(
-            0.05,
-            5,
+        ref_wav = gr.Audio(
+            sources=["upload", "microphone"],
+            type="filepath",
+            label="Reference Audio File (Optional)",
+            value=initial_ref
+        )
+            
+        gr.Markdown(
+            " **Note**: Ensure that the reference clip matches the specified language tag. Otherwise, language transfer outputs may inherit the accent of the reference clip's language. To mitigate this, set the CFG weight to 0.",
+            elem_classes=["audio-note"]
+        )
+            
+        exaggeration = gr.Slider(
+            0.25,
+            2,
             step=.05,
-            label="Temperature",
-            value=0.55
+            label="Exaggeration (Neutral = 0.5, extreme values can be unstable)",
+            value=0.35
+        )
+        
+        cfg_weight = gr.Slider(
+            0.2,
+            1,
+            step=.05,
+            label="CFG/Pace",
+            value=0.5
         )
 
-    run_btn = gr.Button(
-        "Generate",
-        variant="primary"
-    )
+        with gr.Accordion("More options", open=False):
+            seed_num = gr.Number(
+                value=737219296,
+                precision=0,
+                label="Seed"
+                    )
+            
+            temp = gr.Slider(
+                0.05,
+                5,
+                step=.05,
+                label="Temperature",
+                value=0.55
+            )
 
-    with gr.Column():
-        audio_output = gr.Audio(
-            label="Output Audio"
+        run_btn = gr.Button(
+            "Generate",
+            variant="primary"
         )
 
-        open_folder_btn = gr.Button(
-            "📂 Abrir carpeta de audios"
+        with gr.Column():
+            audio_output = gr.Audio(
+                label="Output Audio"
+            )
+
+            open_folder_btn = gr.Button(
+                "📂 Abrir carpeta de audios"
+            )
+
+        def on_voice_change(voice_name):
+            return voice_choices.get(voice_name)
+
+        voice_dropdown.change(
+            fn=on_voice_change,
+            inputs=[voice_dropdown],
+            outputs=[ref_wav],
+            show_progress=False
         )
 
-    def on_voice_change(voice_name):
-        return voice_choices.get(voice_name)
+        def on_language_change(lang, current_ref, current_text):
+            return (
+                current_ref or default_audio_for_ui(lang),
+                current_text
+            )
 
-    voice_dropdown.change(
-        fn=on_voice_change,
-        inputs=[voice_dropdown],
-        outputs=[ref_wav],
-        show_progress=False
-    )
-
-    def on_language_change(lang, current_ref, current_text):
-        return (
-            current_ref or default_audio_for_ui(lang),
-            current_text
+        language_id.change(
+            fn=on_language_change,
+            inputs=[language_id, ref_wav, text],
+            outputs=[ref_wav, text],
+            show_progress=False
         )
 
-    language_id.change(
-        fn=on_language_change,
-        inputs=[language_id, ref_wav, text],
-        outputs=[ref_wav, text],
-        show_progress=False
+    run_btn.click(
+        fn=generate_tts_audio,
+        inputs=[
+            text,
+            language_id,
+            ref_wav,
+            exaggeration,
+            temp,
+            seed_num,
+            cfg_weight,
+        ],
+        outputs=[audio_output],
     )
 
-run_btn.click(
-    fn=generate_tts_audio,
-    inputs=[
-        text,
-        language_id,
-        ref_wav,
-        exaggeration,
-        temp,
-        seed_num,
-        cfg_weight,
-    ],
-    outputs=[audio_output],
-)
+    def open_audio_folder():
+        segments_dir = os.path.join(
+            os.path.dirname(os.path.abspath(__file__)),
+            "outputs",
+            "segments"
+        )
 
-def open_audio_folder():
-    segments_dir = os.path.join(
-        os.path.dirname(os.path.abspath(__file__)),
-        "outputs",
-        "segments"
+        os.makedirs(segments_dir, exist_ok=True)
+
+        os.startfile(segments_dir)
+
+        return None
+
+    open_folder_btn.click(
+        fn=open_audio_folder,
+        inputs=[],
+        outputs=[]
     )
 
-    os.makedirs(segments_dir, exist_ok=True)
-
-    os.startfile(segments_dir)
-
-    return None
-
-open_folder_btn.click(
-    fn=open_audio_folder,
-    inputs=[],
-    outputs=[]
-)
-
-demo.launch(mcp_server=True)
+    demo.launch()
 
 
