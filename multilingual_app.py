@@ -346,49 +346,273 @@ def resolve_audio_prompt(language_id: str, provided_path: str | None) -> str | N
 
 
 def split_text_for_tts(text: str, max_chars: int = 250) -> list[str]:
-    """Split text by paragraphs, not by sentences."""
+    """
+    Divide el texto respetando las oraciones siempre que sea posible.
+
+    Prioridad:
+    1. Mantener las oraciones completas.
+    2. Mantener cada parte dentro de max_chars.
+    3. Si una oración supera max_chars, dividirla por palabras.
+    4. Nunca cortar una palabra.
+    """
 
     text = text.strip()
 
     if not text:
         return []
 
-    # Cada párrafo separado por una línea en blanco = un audio
     paragraphs = re.split(r"\n\s*\n", text)
 
     chunks = []
 
     for paragraph in paragraphs:
+
         paragraph = paragraph.strip()
 
         if not paragraph:
             continue
 
-        # Si el párrafo entra completo, queda como UN solo audio.
-        if len(paragraph) <= max_chars:
-            chunks.append(paragraph)
-            continue
+        # Detectar oraciones terminadas en . ! ?
+        sentences = re.findall(
+            r".+?(?:[.!?]+(?=\s|$)|$)",
+            paragraph,
+            flags=re.DOTALL
+        )
 
-        # Si supera el límite, se divide por palabras.
-        # Nunca se divide por puntos o frases.
-        words = paragraph.split()
-        current = ""
+        current_chunk = ""
 
-        for word in words:
-            candidate = (current + " " + word).strip()
+        for sentence in sentences:
+
+            sentence = sentence.strip()
+
+            if not sentence:
+                continue
+
+            # Si la oración sola supera el límite,
+            # primero guardamos lo que teníamos acumulado.
+            if len(sentence) > max_chars:
+
+                if current_chunk:
+                    chunks.append(current_chunk.strip())
+                    current_chunk = ""
+
+                # Dividir la oración larga por palabras.
+                words = sentence.split()
+                word_chunk = ""
+
+                for word in words:
+
+                    candidate = (
+                        f"{word_chunk} {word}"
+                    ).strip()
+
+                    if len(candidate) <= max_chars:
+                        word_chunk = candidate
+
+                    else:
+
+                        if word_chunk:
+                            chunks.append(
+                                word_chunk.strip()
+                            )
+
+                        word_chunk = word
+
+                if word_chunk:
+                    chunks.append(
+                        word_chunk.strip()
+                    )
+
+                continue
+
+            # Intentar agregar la oración al bloque actual.
+            candidate = (
+                f"{current_chunk} {sentence}"
+            ).strip()
 
             if len(candidate) <= max_chars:
-                current = candidate
+
+                current_chunk = candidate
+
             else:
-                if current:
-                    chunks.append(current)
 
-                current = word
+                if current_chunk:
+                    chunks.append(
+                        current_chunk.strip()
+                    )
 
-        if current:
-            chunks.append(current)
+                current_chunk = sentence
+
+        if current_chunk:
+            chunks.append(
+                current_chunk.strip()
+            )
 
     return chunks
+    
+def regenerate_tts_part(
+    paragraph_number,
+    part_number,
+    language_id,
+    audio_prompt_path_input,
+    exaggeration_input,
+    temperature_input,
+    seed_num_input,
+    cfgw_input
+):
+    """
+    Regenera una única parte de audio.
+    Sobrescribe solamente el WAV seleccionado.
+    """
+
+    current_model = get_or_load_model()
+
+    if current_model is None:
+        raise RuntimeError("TTS model is not loaded.")
+
+    project = load_project()
+
+    if not project:
+        raise ValueError("No hay ningún proyecto guardado.")
+
+    paragraph_number = int(paragraph_number)
+    part_number = int(part_number)
+
+    selected_text = None
+
+    for paragraph in project.get("paragraphs", []):
+
+        if int(paragraph.get("number", 0)) == paragraph_number:
+
+            for part in paragraph.get("parts", []):
+
+                if int(part.get("number", 0)) == part_number:
+                    selected_text = part.get("text")
+                    break
+
+            break
+
+    if not selected_text:
+        raise ValueError(
+            f"No se encontró el texto de "
+            f"Párrafo {paragraph_number}, Parte {part_number}."
+        )
+
+    segments_dir = os.path.join(
+        os.path.dirname(os.path.abspath(__file__)),
+        "outputs",
+        "segments"
+    )
+
+    os.makedirs(segments_dir, exist_ok=True)
+
+    filename = (
+        f"Parrafo_{paragraph_number:03d}_"
+        f"Parte_{part_number:02d}.wav"
+    )
+
+    segment_path = os.path.join(
+        segments_dir,
+        filename
+    )
+
+    chosen_prompt = (
+        audio_prompt_path_input
+        or default_audio_for_ui(language_id)
+    )
+
+    generate_kwargs = {
+        "exaggeration": float(exaggeration_input),
+        "temperature": float(temperature_input),
+        "cfg_weight": float(cfgw_input),
+    }
+
+    if chosen_prompt:
+        generate_kwargs["audio_prompt_path"] = chosen_prompt
+
+    fixed_seed = int(seed_num_input)
+
+    set_seed(fixed_seed)
+
+    print("")
+    print("=" * 60)
+    print("REGENERANDO AUDIO")
+    print("=" * 60)
+    print(f"Párrafo: {paragraph_number}")
+    print(f"Parte: {part_number}")
+    print(f"Seed: {fixed_seed}")
+    print(f"Texto: {selected_text}")
+
+    wav = current_model.generate(
+        selected_text,
+        language_id=language_id,
+        **generate_kwargs
+    )
+
+    audio = (
+        wav.squeeze(0)
+        .detach()
+        .cpu()
+        .numpy()
+        .astype(np.float32)
+    )
+
+    torchaudio.save(
+        segment_path,
+        torch.from_numpy(audio).unsqueeze(0),
+        current_model.sr
+    )
+
+    print(f"[REGENERADO] {filename}")
+
+    return segment_path
+
+def test_split_text(text_input):
+    """
+    Prueba cómo split_text_for_tts() divide el texto.
+    No genera ningún audio.
+    """
+
+    if not text_input or not text_input.strip():
+        return "No se ingresó ningún texto."
+
+    chunks = split_text_for_tts(
+        text_input,
+        max_chars=MAX_CHARS
+    )
+
+    lines = []
+
+    lines.append("=" * 70)
+    lines.append("PRUEBA DE DIVISIÓN DEL TEXTO")
+    lines.append("=" * 70)
+    lines.append(f"Máximo por parte: {MAX_CHARS}")
+    lines.append(f"Total de partes: {len(chunks)}")
+    lines.append("")
+
+    for index, chunk in enumerate(chunks, start=1):
+
+        lines.append(
+            f"PARTE {index:02d} | "
+            f"{len(chunk)} caracteres"
+        )
+
+        lines.append(
+            f"Termina en: {repr(chunk[-30:])}"
+        )
+
+        lines.append(
+            f"Texto completo: {chunk}"
+        )
+
+        lines.append("-" * 70)
+
+    result = "\n".join(lines)
+
+    print("")
+    print(result)
+
+    return result
 
 def generate_tts_audio(
     text_input: str,
@@ -670,6 +894,22 @@ with gr.Blocks() as demo:
                 max_lines=5
             )
 
+            split_test_btn = gr.Button(
+                "🧪 Probar división del texto"
+            )
+
+            split_test_output = gr.Textbox(
+                label="Resultado de la prueba",
+                lines=15,
+                interactive=False
+            )
+
+            split_test_btn.click(
+                fn=test_split_text,
+                inputs=[text_input],
+                outputs=[split_test_output]
+            )
+
             language_id = gr.Dropdown(
                 choices=list(
                     ChatterboxMultilingualTTS.get_supported_languages().keys()
@@ -748,6 +988,79 @@ with gr.Blocks() as demo:
             open_folder_btn = gr.Button(
                 "📂 Abrir carpeta de audios"
             )
+
+            gr.Markdown("---")
+            gr.Markdown("## 🎙️ Panel de audios")
+
+            audio_files = []
+
+            segments_dir = os.path.join(
+                os.path.dirname(os.path.abspath(__file__)),
+                "outputs",
+                "segments"
+            )
+
+            os.makedirs(segments_dir, exist_ok=True)
+
+            for filename in sorted(os.listdir(segments_dir)):
+
+                if not filename.lower().endswith(".wav"):
+                    continue
+
+                audio_path = os.path.join(
+                    segments_dir,
+                    filename
+                )
+
+                match = re.match(
+                    r"Parrafo_(\d+)_Parte_(\d+)\.wav",
+                    filename
+                )
+
+                if not match:
+                    continue
+
+                paragraph_number = int(match.group(1))
+                part_number = int(match.group(2))
+
+                with gr.Row():
+
+                    with gr.Column(scale=4):
+
+                        gr.Audio(
+                            value=audio_path,
+                            label=(
+                                f"Párrafo {paragraph_number:03d} "
+                                f"- Parte {part_number:02d}"
+                            ),
+                            type="filepath"
+                        )
+
+                    with gr.Column(scale=1):
+
+                        regenerate_btn = gr.Button(
+                            "🔄 Generar de nuevo"
+                        )
+
+                        regenerate_btn.click(
+                            fn=regenerate_tts_part,
+                            inputs=[
+                                gr.State(paragraph_number),
+                                gr.State(part_number),
+                                language_id,
+                                ref_wav,
+                                exaggeration,
+                                temp,
+                                seed_num,
+                                cfg_weight,
+                            ],
+                            outputs=[]
+                        )
+
+            if not audio_files:
+                gr.Markdown(
+                    "ℹ️ Todavía no hay audios generados."
+                )
 
     # =========================================================
     # EVENTOS
