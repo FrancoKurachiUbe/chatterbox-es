@@ -210,90 +210,54 @@ DEFAULT_SEED = 737219296
 def save_project(
     text_input,
     language_id,
-    seed,
-    exaggeration,
-    temperature,
-    cfg_weight
+    audio_prompt_path_input,
+    exaggeration_input,
+    temperature_input,
+    seed_num_input,
+    cfgw_input
 ):
-    """
-    Save the current script and settings to project.json.
-    """
-
     os.makedirs(OUTPUTS_DIR, exist_ok=True)
 
-    normalized_text = text_input.replace("\r\n", "\n").strip()
-
-    paragraphs = [
-        paragraph.strip()
-        for paragraph in re.split(
-            r"\n\s*\n",
-            normalized_text
-        )
-        if paragraph.strip()
-    ]
+    scenes = parse_scenes_from_script(text_input)
 
     project = {
-        "last_script": normalized_text,
-
+        "last_script": text_input,
         "settings": {
             "language": language_id,
-            "seed": int(seed),
-            "max_chars": MAX_CHARS,
-            "exaggeration": float(exaggeration),
-            "temperature": float(temperature),
-            "cfg_weight": float(cfg_weight)
+            "audio_prompt_path": audio_prompt_path_input,
+            "exaggeration": exaggeration_input,
+            "temperature": temperature_input,
+            "seed": seed_num_input,
+            "cfg_weight": cfgw_input,
         },
-
-        "paragraphs": []
+        "scenes": []
     }
 
-    for paragraph_number, paragraph in enumerate(
-        paragraphs,
-        start=1
-    ):
-
-        parts = [
-            part.strip()
-            for part in split_text_for_tts(
-                paragraph,
-                max_chars=MAX_CHARS
-            )
-            if part and part.strip()
-        ]
-
-        paragraph_data = {
-            "number": paragraph_number,
-            "parts": []
-        }
-
-        for part_number, part in enumerate(
-            parts,
-            start=1
-        ):
-
-            paragraph_data["parts"].append({
-                "number": part_number,
-                "text": part
-            })
-
-        project["paragraphs"].append(
-            paragraph_data
+    for scene in scenes:
+        parts = split_text_for_tts(
+            scene["text"],
+            max_chars=MAX_CHARS
         )
 
-    with open(
-        PROJECT_FILE,
-        "w",
-        encoding="utf-8"
-    ) as f:
+        project["scenes"].append({
+            "number": scene["number"],
+            "title": scene["title"],
+            "parts": [
+                {
+                    "number": index + 1,
+                    "text": part
+                }
+                for index, part in enumerate(parts)
+            ]
+        })
 
+    with open(PROJECT_FILE, "w", encoding="utf-8") as f:
         json.dump(
             project,
             f,
             ensure_ascii=False,
-            indent=4
+            indent=2
         )
-
-    print(f"Project saved to: {PROJECT_FILE}")
 
     return project
 
@@ -345,114 +309,88 @@ def resolve_audio_prompt(language_id: str, provided_path: str | None) -> str | N
     return LANGUAGE_CONFIG.get(language_id, {}).get("audio")
 
 
-def split_text_for_tts(text: str, max_chars: int = 250) -> list[str]:
+def parse_scenes_from_script(text_input: str) -> list[dict]:
     """
-    Divide el texto respetando las oraciones.
+    Detecta escenas con formato:
+    
+    ESCENA 1 — Título
+    Texto de la escena...
 
-    Reglas:
-    1. Intenta mantener cada parte cerca de max_chars.
-    2. Nunca corta una oración normal.
-    3. Si una oración individual supera max_chars,
-       intenta dividirla por palabras.
-    4. Nunca corta una palabra.
+    ESCENA 2 — Otro título
+    Texto de la escena...
+
+    El título nunca se envía a Chatterbox.
     """
+    text_input = text_input.replace("\r\n", "\n").replace("\r", "\n").strip()
 
-    text = text.strip()
+    if not text_input:
+        raise ValueError("El guion está vacío.")
 
-    if not text:
-        return []
+    lines = text_input.split("\n")
 
-    paragraphs = re.split(r"\n\s*\n", text)
+    scene_header_pattern = re.compile(
+        r"^\s*ESCENA\s+(\d+)(?:\s*[—–:-]\s*(.*))?\s*$",
+        re.IGNORECASE
+    )
 
-    chunks = []
+    scenes = []
+    current_scene = None
+    content_before_first_scene = []
 
-    for paragraph in paragraphs:
+    for line in lines:
+        match = scene_header_pattern.match(line)
 
-        paragraph = paragraph.strip()
+        if match:
+            if current_scene is not None:
+                current_scene["text"] = "\n".join(
+                    current_scene["text_lines"]
+                ).strip()
 
-        if not paragraph:
-            continue
+                del current_scene["text_lines"]
+                scenes.append(current_scene)
 
-        # Detectar oraciones completas.
-        sentences = re.findall(
-            r".+?(?:[.!?]+(?=\s|$)|$)",
-            paragraph,
-            flags=re.DOTALL
+            scene_number = int(match.group(1))
+            scene_title = (match.group(2) or "").strip()
+
+            current_scene = {
+                "number": scene_number,
+                "title": scene_title,
+                "text_lines": []
+            }
+
+        else:
+            if current_scene is not None:
+                current_scene["text_lines"].append(line)
+            elif line.strip():
+                content_before_first_scene.append(line.strip())
+
+    if current_scene is not None:
+        current_scene["text"] = "\n".join(
+            current_scene["text_lines"]
+        ).strip()
+
+        del current_scene["text_lines"]
+        scenes.append(current_scene)
+
+    if content_before_first_scene:
+        raise ValueError(
+            "Hay texto antes de la primera ESCENA. "
+            "El guion debe comenzar con 'ESCENA 1 — Título'."
         )
 
-        current_chunk = ""
+    if not scenes:
+        raise ValueError(
+            "No se encontraron escenas. "
+            "Usá el formato 'ESCENA 1 — Título'."
+        )
 
-        for sentence in sentences:
-
-            sentence = sentence.strip()
-
-            if not sentence:
-                continue
-
-            # Si la oración individual es demasiado larga,
-            # primero guardamos lo que ya teníamos.
-            if len(sentence) > max_chars:
-
-                if current_chunk:
-                    chunks.append(current_chunk.strip())
-                    current_chunk = ""
-
-                # Dividir solamente esta oración larga por palabras.
-                words = sentence.split()
-                word_chunk = ""
-
-                for word in words:
-
-                    candidate = (
-                        f"{word_chunk} {word}"
-                    ).strip()
-
-                    if len(candidate) <= max_chars:
-                        word_chunk = candidate
-
-                    else:
-
-                        if word_chunk:
-                            chunks.append(
-                                word_chunk.strip()
-                            )
-
-                        word_chunk = word
-
-                if word_chunk:
-                    chunks.append(
-                        word_chunk.strip()
-                    )
-
-                continue
-
-            # Intentar agregar la oración completa.
-            candidate = (
-                f"{current_chunk} {sentence}"
-            ).strip()
-
-            if len(candidate) <= max_chars:
-
-                current_chunk = candidate
-
-            else:
-
-                # No entra la oración completa.
-                # Guardamos la parte anterior y comenzamos
-                # una nueva parte con esta oración COMPLETA.
-                if current_chunk:
-                    chunks.append(
-                        current_chunk.strip()
-                    )
-
-                current_chunk = sentence
-
-        if current_chunk:
-            chunks.append(
-                current_chunk.strip()
+    for scene in scenes:
+        if not scene["text"]:
+            raise ValueError(
+                f"La ESCENA {scene['number']} no tiene texto."
             )
 
-    return chunks
+    return scenes
     
     
 def regenerate_tts_part(
