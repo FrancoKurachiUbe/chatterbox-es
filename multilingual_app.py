@@ -851,18 +851,161 @@ def generate_tts_audio(
     return None
 
 
-with gr.Blocks() as demo:
-    gr.Markdown(
+# =========================================================
+# CRÓNICAS MUNDIALES — NARRATION STUDIO
+# =========================================================
+
+CUSTOM_CSS = """
+/* ===== GLOBAL ===== */
+
+body {
+    background: #0b0d10 !important;
+}
+
+.gradio-container {
+    max-width: 1500px !important;
+    background: #0b0d10 !important;
+}
+
+/* ===== HEADER ===== */
+
+.cm-header {
+    text-align: center;
+    padding: 28px 20px 20px 20px;
+    margin-bottom: 20px;
+    border-bottom: 1px solid #252a31;
+}
+
+.cm-title {
+    font-size: 34px;
+    font-weight: 700;
+    letter-spacing: 2px;
+    color: #f1f1f1;
+    margin-bottom: 5px;
+}
+
+.cm-subtitle {
+    font-size: 15px;
+    color: #8d96a3;
+    letter-spacing: 3px;
+    text-transform: uppercase;
+}
+
+/* ===== SECTION TITLES ===== */
+
+.cm-section-title {
+    font-size: 16px;
+    font-weight: 600;
+    letter-spacing: 1px;
+    color: #d8dde5;
+    margin-top: 8px;
+    margin-bottom: 10px;
+}
+
+/* ===== CARDS ===== */
+
+.cm-card {
+    background: #12161b;
+    border: 1px solid #252a31;
+    border-radius: 12px;
+    padding: 18px;
+}
+
+/* ===== SCRIPT BOX ===== */
+
+.cm-script textarea {
+    background: #0f1216 !important;
+    border: 1px solid #292f37 !important;
+    border-radius: 10px !important;
+    color: #e7eaf0 !important;
+    font-size: 15px !important;
+    line-height: 1.55 !important;
+}
+
+/* ===== MAIN BUTTON ===== */
+
+.cm-generate button {
+    height: 52px !important;
+    border-radius: 9px !important;
+    font-size: 16px !important;
+    font-weight: 600 !important;
+}
+
+/* ===== SECONDARY BUTTONS ===== */
+
+.cm-secondary button {
+    border-radius: 8px !important;
+}
+
+/* ===== AUDIO PANEL ===== */
+
+.cm-audio-panel {
+    background: #0f1216;
+    border: 1px solid #252a31;
+    border-radius: 12px;
+    padding: 16px;
+}
+
+/* ===== PARAGRAPH HEADER ===== */
+
+.cm-paragraph {
+    background: #151a20;
+    border: 1px solid #2a3038;
+    border-radius: 10px;
+    padding: 12px 15px;
+    margin-top: 15px;
+}
+
+/* ===== STATUS ===== */
+
+.cm-status {
+    background: #101419;
+    border: 1px solid #252a31;
+    border-radius: 10px;
+    padding: 14px;
+}
+
+/* ===== SMALL TEXT ===== */
+
+.cm-muted {
+    color: #7f8996;
+    font-size: 13px;
+}
+
+/* ===== ACCORDION ===== */
+
+.cm-settings {
+    border: 1px solid #252a31 !important;
+    border-radius: 10px !important;
+}
+"""
+
+
+with gr.Blocks(
+    title="Crónicas Mundiales — Narration Studio",
+    css=CUSTOM_CSS
+) as demo:
+
+    # =====================================================
+    # HEADER
+    # =====================================================
+
+    gr.HTML(
         """
-        # Chatterbox Multilingual Demo
-        Generate high-quality multilingual speech from text with reference audio styling, supporting 23 languages.
+        <div class="cm-header">
+            <div class="cm-title">CRÓNICAS MUNDIALES</div>
+            <div class="cm-subtitle">Narration Studio</div>
+        </div>
         """
     )
 
-    gr.Markdown(get_supported_languages_display())
+    # =====================================================
+    # PROJECT STATE
+    # =====================================================
+
+    saved_project = load_project()
 
     initial_lang = "es"
-    saved_project = load_project()
 
     initial_text = (
         saved_project.get("last_script")
@@ -871,6 +1014,7 @@ with gr.Blocks() as demo:
     )
 
     voice_choices = get_voice_choices()
+
     preferred_voice = "Brian Warm Clonacion Voz"
 
     initial_voice = (
@@ -885,86 +1029,104 @@ with gr.Blocks() as demo:
         else default_audio_for_ui(initial_lang)
     )
 
+    # =====================================================
+    # MAIN LAYOUT
+    # =====================================================
+
     with gr.Row():
 
-        # =====================================================
-        # COLUMNA IZQUIERDA
-        # =====================================================
+        # =================================================
+        # LEFT — SCRIPT / SETTINGS
+        # =================================================
 
-        with gr.Column():
+        with gr.Column(scale=5):
 
-            text = gr.Textbox(
-                value=initial_text,
-                label="Text to synthesize (max chars 250)",
-                max_lines=5
+            gr.HTML(
+                '<div class="cm-section-title">📝 GUION</div>'
             )
 
-            split_test_btn = gr.Button(
-                "🧪 Probar división del texto"
+            with gr.Group(elem_classes="cm-card"):
+
+                text = gr.Textbox(
+                    value=initial_text,
+                    label="Texto de narración",
+                    placeholder=(
+                        "Pegá aquí el guion. "
+                        "Separá cada párrafo con una línea en blanco."
+                    ),
+                    lines=18,
+                    max_lines=30,
+                    elem_classes="cm-script"
+                )
+
+                gr.Markdown(
+                    """
+                    <div class="cm-muted">
+                    Los párrafos deben separarse mediante una línea en blanco.
+                    El sistema divide automáticamente cada párrafo en partes.
+                    </div>
+                    """
+                )
+
+            # =============================================
+            # VOICE
+            # =============================================
+
+            gr.HTML(
+                '<div class="cm-section-title">🎙️ VOZ</div>'
             )
 
-            split_test_output = gr.Textbox(
-                label="Resultado de la prueba",
-                lines=15,
-                interactive=False
-            )
+            with gr.Group(elem_classes="cm-card"):
 
-            split_test_btn.click(
-                fn=test_split_text,
-                inputs=[text],
-                outputs=[split_test_output]
-            )
+                language_id = gr.Dropdown(
+                    choices=list(
+                        ChatterboxMultilingualTTS
+                        .get_supported_languages()
+                        .keys()
+                    ),
+                    value=initial_lang,
+                    label="Idioma",
+                    info="Idioma utilizado para la síntesis"
+                )
 
-            language_id = gr.Dropdown(
-                choices=list(
-                    ChatterboxMultilingualTTS.get_supported_languages().keys()
-                ),
-                value=initial_lang,
-                label="Language",
-                info="Select the language for text-to-speech synthesis"
-            )
+                voice_dropdown = gr.Dropdown(
+                    choices=list(voice_choices.keys()),
+                    value=initial_voice,
+                    label="Voz",
+                    info="Voz de referencia"
+                )
 
-            voice_dropdown = gr.Dropdown(
-                choices=list(voice_choices.keys()),
-                value=initial_voice,
-                label="Voice",
-                info="Select a voice from the voices folder"
-            )
+                ref_wav = gr.Audio(
+                    sources=["upload", "microphone"],
+                    type="filepath",
+                    label="Audio de referencia",
+                    value=initial_ref
+                )
 
-            ref_wav = gr.Audio(
-                sources=["upload", "microphone"],
-                type="filepath",
-                label="Reference Audio File (Optional)",
-                value=initial_ref
-            )
+            # =============================================
+            # SETTINGS
+            # =============================================
 
-            gr.Markdown(
-                " **Note**: Ensure that the reference clip matches the specified language tag. Otherwise, language transfer outputs may inherit the accent of the reference clip's language. To mitigate this, set the CFG weight to 0.",
-                elem_classes=["audio-note"]
-            )
+            with gr.Accordion(
+                "⚙️ Configuración de narración",
+                open=False,
+                elem_classes="cm-settings"
+            ):
 
-            exaggeration = gr.Slider(
-                0.25,
-                2,
-                step=0.05,
-                label="Exaggeration (Neutral = 0.5, extreme values can be unstable)",
-                value=0.35
-            )
+                exaggeration = gr.Slider(
+                    0.25,
+                    2,
+                    step=0.05,
+                    label="Exaggeration",
+                    value=0.35
+                )
 
-            cfg_weight = gr.Slider(
-                0.2,
-                1,
-                step=0.05,
-                label="CFG/Pace",
-                value=0.5
-            )
-
-            with gr.Accordion("More options", open=False):
-
-                seed_num = gr.Number(
-                    value=737219296,
-                    precision=0,
-                    label="Seed"
+                cfg_weight = gr.Slider(
+                    0.2,
+                    1,
+                    step=0.05,
+                    label="CFG / Pace",
+                    value=0.5
                 )
 
                 temp = gr.Slider(
@@ -975,104 +1137,104 @@ with gr.Blocks() as demo:
                     value=0.55
                 )
 
+                seed_num = gr.Number(
+                    value=737219296,
+                    precision=0,
+                    label="Seed fija"
+                )
+
+            # =============================================
+            # GENERATE
+            # =============================================
+
             run_btn = gr.Button(
-                "Generate",
-                variant="primary"
+                "🎙️ GENERAR NARRACIÓN",
+                variant="primary",
+                elem_classes="cm-generate"
             )
 
-        # =====================================================
-        # COLUMNA DERECHA
-        # =====================================================
 
-        with gr.Column():
+        # =================================================
+        # RIGHT — PRODUCTION
+        # =================================================
 
-            audio_output = gr.Audio(
-                label="Output Audio"
+        with gr.Column(scale=6):
+
+            gr.HTML(
+                '<div class="cm-section-title">🎧 PRODUCCIÓN</div>'
             )
 
-            open_folder_btn = gr.Button(
-                "📂 Abrir carpeta de audios"
-            )
+            # =============================================
+            # MAIN OUTPUT
+            # =============================================
 
-            gr.Markdown("---")
-            gr.Markdown("## 🎙️ Panel de audios")
+            with gr.Group(elem_classes="cm-card"):
 
-            audio_files = []
-
-            segments_dir = os.path.join(
-                os.path.dirname(os.path.abspath(__file__)),
-                "outputs",
-                "segments"
-            )
-
-            os.makedirs(segments_dir, exist_ok=True)
-
-            for filename in sorted(os.listdir(segments_dir)):
-
-                if not filename.lower().endswith(".wav"):
-                    continue
-
-                audio_path = os.path.join(
-                    segments_dir,
-                    filename
+                audio_output = gr.Audio(
+                    label="Último audio generado",
+                    type="filepath"
                 )
 
-                match = re.match(
-                    r"Parrafo_(\d+)_Parte_(\d+)\.wav",
-                    filename
+                open_folder_btn = gr.Button(
+                    "📂 Abrir carpeta de audios",
+                    elem_classes="cm-secondary"
                 )
 
-                if not match:
-                    continue
+            # =============================================
+            # STATUS
+            # =============================================
 
-                paragraph_number = int(match.group(1))
-                part_number = int(match.group(2))
+            with gr.Group(elem_classes="cm-status"):
 
-                with gr.Row():
-
-                    with gr.Column(scale=4):
-
-                        gr.Audio(
-                            value=audio_path,
-                            label=(
-                                f"Párrafo {paragraph_number:03d} "
-                                f"- Parte {part_number:02d}"
-                            ),
-                            type="filepath"
-                        )
-
-                    with gr.Column(scale=1):
-
-                        regenerate_btn = gr.Button(
-                            "🔄 Generar de nuevo"
-                        )
-
-                        regenerate_btn.click(
-                            fn=regenerate_tts_part,
-                            inputs=[
-                                gr.State(paragraph_number),
-                                gr.State(part_number),
-                                language_id,
-                                ref_wav,
-                                exaggeration,
-                                temp,
-                                seed_num,
-                                cfg_weight,
-                            ],
-                            outputs=[]
-                        )
-
-            if not audio_files:
                 gr.Markdown(
-                    "ℹ️ Todavía no hay audios generados."
+                    """
+                    ### Estado del proyecto
+
+                    🟢 **Listo para generar**
+
+                    <span class="cm-muted">
+                    Los audios generados aparecerán aquí.
+                    </span>
+                    """
                 )
 
-    # =========================================================
-    # EVENTOS
-    # =========================================================
+            # =============================================
+            # AUDIO PANEL
+            # =============================================
+
+            gr.HTML(
+                '<div class="cm-section-title">🎚️ PARTES GENERADAS</div>'
+            )
+
+            with gr.Group(elem_classes="cm-audio-panel"):
+
+                gr.Markdown(
+                    """
+                    ### Panel de audios
+
+                    <span class="cm-muted">
+                    Cada párrafo será organizado por partes.
+                    Desde aquí podremos reproducir y regenerar
+                    segmentos individuales.
+                    </span>
+                    """
+                )
+
+                gr.Markdown(
+                    """
+                    ℹ️ El panel dinámico de audios se agregará
+                    en el siguiente paso.
+                    """
+                )
+
+
+    # =====================================================
+    # EVENTS
+    # =====================================================
 
     def on_voice_change(voice_name):
         return voice_choices.get(voice_name)
+
 
     voice_dropdown.change(
         fn=on_voice_change,
@@ -1081,18 +1243,37 @@ with gr.Blocks() as demo:
         show_progress=False
     )
 
-    def on_language_change(lang, current_ref, current_text):
+
+    def on_language_change(
+        lang,
+        current_ref,
+        current_text
+    ):
+
         return (
             current_ref or default_audio_for_ui(lang),
             current_text
         )
 
+
     language_id.change(
         fn=on_language_change,
-        inputs=[language_id, ref_wav, text],
-        outputs=[ref_wav, text],
+        inputs=[
+            language_id,
+            ref_wav,
+            text
+        ],
+        outputs=[
+            ref_wav,
+            text
+        ],
         show_progress=False
     )
+
+
+    # =====================================================
+    # GENERATE EVENT
+    # =====================================================
 
     run_btn.click(
         fn=generate_tts_audio,
@@ -1105,25 +1286,43 @@ with gr.Blocks() as demo:
             seed_num,
             cfg_weight,
         ],
-        outputs=[audio_output],
+        outputs=[audio_output]
     )
 
+
+    # =====================================================
+    # OPEN AUDIO FOLDER
+    # =====================================================
+
     def open_audio_folder():
+
         segments_dir = os.path.join(
-            os.path.dirname(os.path.abspath(__file__)),
+            os.path.dirname(
+                os.path.abspath(__file__)
+            ),
             "outputs",
             "segments"
         )
 
-        os.makedirs(segments_dir, exist_ok=True)
+        os.makedirs(
+            segments_dir,
+            exist_ok=True
+        )
 
         os.startfile(segments_dir)
 
         return None
+
 
     open_folder_btn.click(
         fn=open_audio_folder,
         inputs=[],
         outputs=[]
     )
+
+
+# =========================================================
+# LAUNCH
+# =========================================================
+
 demo.launch()
