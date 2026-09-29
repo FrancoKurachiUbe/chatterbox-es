@@ -1944,7 +1944,6 @@ def batch_regenerate_from_ui(
     )
 
     if not parsed_items:
-
         raise ValueError(
             "No seleccionaste ninguna parte."
         )
@@ -1968,6 +1967,8 @@ def batch_regenerate_from_ui(
         int(current_refresh) + 1,
         []
     )
+
+
 
 
 def regenerate_one_from_ui(
