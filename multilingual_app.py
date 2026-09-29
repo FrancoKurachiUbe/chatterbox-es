@@ -1640,6 +1640,386 @@ def get_project_status(
         f"⏳ **Partes faltantes:** {missing_parts}"
     )
 
+# =========================================================
+# UI / AUDIO PANEL HELPERS
+# =========================================================
+
+def get_panel_data(processing_mode):
+    """
+    Devuelve la información necesaria para construir
+    dinámicamente el panel de producción.
+    """
+
+    project = load_project()
+
+    if not project:
+        return []
+
+    result = []
+
+    for section in project.get("sections", []):
+
+        section_number = int(
+            section.get("number", 0)
+        )
+
+        title = section.get(
+            "title",
+            ""
+        )
+
+        parts_data = []
+
+        for part in section.get(
+            "parts",
+            []
+        ):
+
+            part_number = int(
+                part.get("number", 0)
+            )
+
+            part_path = get_section_path(
+                processing_mode,
+                section_number,
+                part_number
+            )
+
+            exists = os.path.exists(
+                part_path
+            )
+
+            parts_data.append({
+                "number": part_number,
+                "text": part.get(
+                    "text",
+                    ""
+                ),
+                "path": (
+                    part_path
+                    if exists
+                    else None
+                ),
+                "exists": exists
+            })
+
+        final_prefix = get_section_label(
+            processing_mode
+        )
+
+        final_filename = (
+            f"{final_prefix}_"
+            f"{section_number:03d}.wav"
+        )
+
+        final_path = os.path.join(
+            SEGMENTS_DIR,
+            final_filename
+        )
+
+        result.append({
+            "number": section_number,
+            "title": title,
+            "parts": parts_data,
+            "final_path": (
+                final_path
+                if os.path.exists(final_path)
+                else None
+            )
+        })
+
+    return result
+
+
+def get_selection_choices(
+    processing_mode
+):
+    """
+    Construye las opciones del selector general.
+    """
+
+    data = get_panel_data(
+        processing_mode
+    )
+
+    choices = []
+
+    label = get_section_label(
+        processing_mode
+    )
+
+    for section in data:
+
+        section_number = section[
+            "number"
+        ]
+
+        title = section.get(
+            "title",
+            ""
+        )
+
+        for part in section["parts"]:
+
+            part_number = part[
+                "number"
+            ]
+
+            value = (
+                f"{processing_mode}|"
+                f"{section_number}|"
+                f"{part_number}"
+            )
+
+            if processing_mode == "scene":
+                display = (
+                    f"Escena "
+                    f"{section_number}"
+                )
+
+                if title:
+                    display += (
+                        f" — {title}"
+                    )
+
+                display += (
+                    f" · Parte "
+                    f"{part_number:02d}"
+                )
+
+            else:
+                display = (
+                    f"Párrafo "
+                    f"{section_number:03d}"
+                    f" · Parte "
+                    f"{part_number:02d}"
+                )
+
+            if not part["exists"]:
+                display += "  ⏳"
+
+            choices.append(
+                (
+                    display,
+                    value
+                )
+            )
+
+    return choices
+
+
+def parse_selected_items(
+    selected_items
+):
+    """
+    Convierte:
+        paragraph|1|2
+
+    en:
+        (1, 2)
+    """
+
+    parsed = []
+
+    if not selected_items:
+        return parsed
+
+    for item in selected_items:
+
+        if not isinstance(
+            item,
+            str
+        ):
+            continue
+
+        parts = item.split(
+            "|"
+        )
+
+        if len(parts) != 3:
+            continue
+
+        try:
+
+            section_number = int(
+                parts[1]
+            )
+
+            part_number = int(
+                parts[2]
+            )
+
+            parsed.append(
+                (
+                    section_number,
+                    part_number
+                )
+            )
+
+        except ValueError:
+
+            continue
+
+    return parsed
+
+
+def refresh_selection_choices(
+    processing_mode
+):
+    """
+    Actualiza el selector general
+    después de generar audios.
+    """
+
+    choices = get_selection_choices(
+        processing_mode
+    )
+
+    return gr.CheckboxGroup(
+        choices=choices,
+        value=[],
+        label="Seleccioná las partes",
+        info=(
+            "Podés seleccionar varias partes "
+            "de distintos párrafos o escenas."
+        ),
+        interactive=True,
+        elem_classes="cm-selection"
+    )
+
+
+def batch_regenerate_from_ui(
+    selected_items,
+    processing_mode,
+    language_id,
+    audio_prompt_path_input,
+    exaggeration_input,
+    temperature_input,
+    seed_num_input,
+    cfgw_input
+):
+    """
+    Adaptador entre CheckboxGroup y
+    batch_regenerate_tts_parts().
+    """
+
+    parsed_items = parse_selected_items(
+        selected_items
+    )
+
+    if not parsed_items:
+
+        raise ValueError(
+            "No seleccionaste ninguna parte."
+        )
+
+    message = batch_regenerate_tts_parts(
+        parsed_items,
+        processing_mode,
+        language_id,
+        audio_prompt_path_input,
+        exaggeration_input,
+        temperature_input,
+        seed_num_input,
+        cfgw_input
+    )
+
+    def batch_regenerate_from_ui(
+    selected_items,
+    processing_mode,
+    language_id,
+    audio_prompt_path_input,
+    exaggeration_input,
+    temperature_input,
+    seed_num_input,
+    cfgw_input,
+    current_refresh
+):
+    """
+    Regenera todas las partes seleccionadas.
+    """
+
+    parsed_items = parse_selected_items(
+        selected_items
+    )
+
+    if not parsed_items:
+
+        raise ValueError(
+            "No seleccionaste ninguna parte."
+        )
+
+    message = batch_regenerate_tts_parts(
+        parsed_items,
+        processing_mode,
+        language_id,
+        audio_prompt_path_input,
+        exaggeration_input,
+        temperature_input,
+        seed_num_input,
+        cfgw_input
+    )
+
+    return (
+        message,
+        get_project_status(
+            processing_mode
+        ),
+        int(current_refresh) + 1,
+        []
+    )
+
+
+def regenerate_one_from_ui(
+    processing_mode,
+    section_number,
+    part_number,
+    language_id,
+    audio_prompt_path_input,
+    exaggeration_input,
+    temperature_input,
+    seed_num_input,
+    cfgw_input,
+    current_refresh
+):
+
+    path = regenerate_tts_part(
+        processing_mode,
+        section_number,
+        part_number,
+        language_id,
+        audio_prompt_path_input,
+        exaggeration_input,
+        temperature_input,
+        seed_num_input,
+        cfgw_input
+    )
+
+    return (
+        path,
+        get_project_status(
+            processing_mode
+        ),
+        int(current_refresh) + 1
+    )
+
+
+def join_section_from_ui(
+    processing_mode,
+    section_number
+):
+
+    path = join_section_audio(
+        processing_mode,
+        section_number
+    )
+
+    return (
+        path,
+        get_project_status(
+            processing_mode
+        )
+    )
 
 CUSTOM_CSS = """
 /* ===== GLOBAL ===== */
@@ -1764,7 +2144,68 @@ body {
     border: 1px solid #252a31 !important;
     border-radius: 10px !important;
 }
+/* ===== SELECTION PANEL ===== */
 
+.cm-selection {
+    background: #101419 !important;
+    border: 1px solid #252a31 !important;
+    border-radius: 10px !important;
+    padding: 14px !important;
+}
+
+.cm-selection label {
+    color: #d8dde5 !important;
+}
+
+/* ===== AUDIO ROW ===== */
+
+.cm-audio-row {
+    background: #12161b;
+    border: 1px solid #292f37;
+    border-radius: 10px;
+    padding: 12px;
+    margin-top: 8px;
+}
+
+/* ===== SECTION PANEL ===== */
+
+.cm-section-card {
+    background: #101419;
+    border: 1px solid #2a3038;
+    border-radius: 12px;
+    padding: 15px;
+    margin-top: 15px;
+}
+
+/* ===== FINAL AUDIO ===== */
+
+.cm-final-audio {
+    background: #151a20;
+    border: 1px solid #303741;
+    border-radius: 10px;
+    padding: 12px;
+    margin-top: 10px;
+}
+
+/* ===== PART TEXT ===== */
+
+.cm-part-text {
+    color: #8d96a3;
+    font-size: 13px;
+    line-height: 1.45;
+}
+
+/* ===== PART STATUS ===== */
+
+.cm-part-ready {
+    color: #78d99b;
+    font-weight: 600;
+}
+
+.cm-part-missing {
+    color: #e7b65a;
+    font-weight: 600;
+}
 
 """
 
@@ -2017,9 +2458,8 @@ with gr.Blocks(
                     </span>
                     """
                 )
-
             # =============================================
-            # AUDIO PANEL
+            # AUDIO PRODUCTION PANEL
             # =============================================
 
             gr.HTML(
@@ -2037,14 +2477,46 @@ with gr.Blocks(
                     ### 🎧 Revisión y producción
 
                     <span class="cm-muted">
-                    Revisá cada parte antes de unir el párrafo
-                    o la escena. Podés regenerar partes individuales
-                    o seleccionar varias para regenerarlas juntas.
+                    Generá las partes, escuchalas individualmente,
+                    regenerá las que no te convenzan y finalmente
+                    uní cada párrafo o escena.
                     </span>
                     """
                 )
 
+                # -----------------------------------------
+                # GLOBAL SELECTION
+                # -----------------------------------------
+
+                initial_selection_choices = (
+                    get_selection_choices(
+                        initial_processing_mode
+                    )
+                )
+
+                selected_parts = gr.CheckboxGroup(
+                    choices=initial_selection_choices,
+                    value=[],
+                    label="Seleccionar partes",
+                    info=(
+                        "Seleccioná una o varias partes "
+                        "para regenerarlas juntas."
+                    ),
+                    interactive=True,
+                    elem_classes="cm-selection"
+                )
+
                 with gr.Row():
+
+                    select_all_btn = gr.Button(
+                        "☑️ Seleccionar todas",
+                        elem_classes="cm-secondary"
+                    )
+
+                    clear_selection_btn = gr.Button(
+                        "⬜ Limpiar selección",
+                        elem_classes="cm-secondary"
+                    )
 
                     batch_regenerate_btn = gr.Button(
                         "🔄 Regenerar seleccionadas",
@@ -2052,10 +2524,9 @@ with gr.Blocks(
                         elem_classes="cm-secondary"
                     )
 
-                    refresh_panel_btn = gr.Button(
-                        "↻ Actualizar panel",
-                        elem_classes="cm-secondary"
-                    )
+                # -----------------------------------------
+                # STATUS
+                # -----------------------------------------
 
                 panel_status = gr.Markdown(
                     get_project_status(
@@ -2063,6 +2534,128 @@ with gr.Blocks(
                     )
                 )
 
+                # -----------------------------------------
+                # DYNAMIC AUDIO PANEL
+                # -----------------------------------------
+
+                
+                refresh_panel_btn = gr.Button(
+                    "↻ Actualizar panel",
+                    elem_classes="cm-secondary"
+                )
+
+            # =================================================
+            # DYNAMIC AUDIO PANEL
+            # =================================================
+
+            # =========================================================
+# SELECTION CONTROLS
+# =========================================================
+
+def select_all_parts(
+    processing_mode
+):
+
+    return [
+        value
+        for _, value
+        in get_selection_choices(
+            processing_mode
+        )
+    ]
+
+
+def clear_all_parts():
+
+    return []
+
+
+select_all_btn.click(
+    fn=select_all_parts,
+    inputs=[
+        processing_mode
+    ],
+    outputs=[
+        selected_parts
+    ],
+    show_progress=False
+)
+
+
+clear_selection_btn.click(
+    fn=clear_all_parts,
+    inputs=[],
+    outputs=[
+        selected_parts
+    ],
+    show_progress=False
+)
+
+
+# =========================================================
+# BATCH REGENERATE
+# =========================================================
+
+def batch_regenerate_and_refresh(
+    selected_items,
+    processing_mode,
+    language_id,
+    audio_prompt_path_input,
+    exaggeration_input,
+    temperature_input,
+    seed_num_input,
+    cfgw_input,
+    current_refresh
+):
+
+    parsed_items = parse_selected_items(
+        selected_items
+    )
+
+    if not parsed_items:
+
+        raise ValueError(
+            "No seleccionaste ninguna parte."
+        )
+
+    message = batch_regenerate_tts_parts(
+        parsed_items,
+        processing_mode,
+        language_id,
+        audio_prompt_path_input,
+        exaggeration_input,
+        temperature_input,
+        seed_num_input,
+        cfgw_input
+    )
+
+    return (
+        message,
+        int(current_refresh) + 1,
+        []
+    )
+
+
+batch_regenerate_btn.click(
+    fn=batch_regenerate_and_refresh,
+    inputs=[
+        selected_parts,
+        processing_mode,
+        language_id,
+        ref_wav,
+        exaggeration,
+        temp,
+        seed_num,
+        cfg_weight,
+        panel_refresh
+    ],
+    outputs=[
+        panel_status,
+        panel_refresh,
+        selected_parts
+    ],
+    show_progress="full"
+)
     def on_voice_change(voice_name):
         return voice_choices.get(voice_name)
 
@@ -2106,20 +2699,58 @@ with gr.Blocks(
     # GENERATE EVENT
     # =====================================================
 
-    run_btn.click(
-        fn=generate_tts_audio,
-        inputs=[
-            text,
-            processing_mode,
-            language_id,
-            ref_wav,
-            exaggeration,
-            temp,
-            seed_num,
-            cfg_weight,
-        ],
-        outputs=[audio_output]
+    def generate_and_refresh(
+    text_input,
+    processing_mode,
+    language_id,
+    audio_prompt_path_input,
+    exaggeration_input,
+    temperature_input,
+    seed_num_input,
+    cfgw_input,
+    current_refresh
+):
+
+    result = generate_tts_audio(
+        text_input,
+        processing_mode,
+        language_id,
+        audio_prompt_path_input,
+        exaggeration_input,
+        temperature_input,
+        seed_num_input,
+        cfgw_input
     )
+
+    return (
+        result,
+        get_project_status(
+            processing_mode
+        ),
+        int(current_refresh) + 1
+    )
+
+
+run_btn.click(
+    fn=generate_and_refresh,
+    inputs=[
+        text,
+        processing_mode,
+        language_id,
+        ref_wav,
+        exaggeration,
+        temp,
+        seed_num,
+        cfg_weight,
+        panel_refresh
+    ],
+    outputs=[
+        audio_output,
+        panel_status,
+        panel_refresh
+    ],
+    show_progress="full"
+)
 
 
     # =====================================================
