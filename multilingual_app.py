@@ -1924,7 +1924,7 @@ def batch_regenerate_from_ui(
         cfgw_input
     )
 
-    def batch_regenerate_from_ui(
+def batch_regenerate_from_ui(
     selected_items,
     processing_mode,
     language_id,
@@ -1967,6 +1967,8 @@ def batch_regenerate_from_ui(
         int(current_refresh) + 1,
         []
     )
+
+
 
 
 
