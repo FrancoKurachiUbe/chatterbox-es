@@ -1634,11 +1634,14 @@ def get_project_status(
 
                 missing_parts += 1
 
-    return (
+        return (
         f"🟢 **{label}s:** {len(sections)}  \n"
         f"🎧 **Partes generadas:** {generated_parts} / {total_parts}  \n"
         f"⏳ **Partes faltantes:** {missing_parts}"
     )
+
+
+CUSTOM_CSS = """
 /* ===== GLOBAL ===== */
 
 body {
@@ -1762,6 +1765,8 @@ body {
     border-radius: 10px !important;
 }
 
+
+"""
 
 
 with gr.Blocks(
