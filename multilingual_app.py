@@ -1178,6 +1178,10 @@ def generate_tts_audio(
 # REGENERATE ONE PART
 # =========================================================
 
+# =========================================================
+# REGENERATE ONE PART
+# =========================================================
+
 def regenerate_tts_part(
     processing_mode,
     section_number,
@@ -1190,108 +1194,64 @@ def regenerate_tts_part(
     cfgw_input
 ):
 
-    current_model = (
-        get_or_load_model()
-    )
+    current_model = get_or_load_model()
 
     project = load_project()
 
     if not project:
-
         raise ValueError(
             "No hay ningún proyecto guardado."
         )
 
-    section_number = int(
-        section_number
-    )
-
-    part_number = int(
-        part_number
-    )
+    section_number = int(section_number)
+    part_number = int(part_number)
 
     selected_text = None
 
-    for section in project.get(
-        "sections",
-        []
-    ):
+    for section in project.get("sections", []):
 
-        if int(
-            section.get(
-                "number",
-                0
-            )
-        ) == section_number:
+        if int(section.get("number", 0)) != section_number:
+            continue
 
-            for part in section.get(
-                "parts",
-                []
-            ):
+        for part in section.get("parts", []):
 
-                if int(
-                    part.get(
-                        "number",
-                        0
-                    )
-                ) == part_number:
+            if int(part.get("number", 0)) == part_number:
 
-                    selected_text = (
-                        part.get("text")
-                    )
+                selected_text = part.get("text")
+                break
 
-                    break
-
-            break
+        break
 
     if not selected_text:
 
         raise ValueError(
-            "No se encontró el texto "
-            "seleccionado."
+            "No se encontró el texto seleccionado."
         )
 
-    segment_path = (
-        get_section_path(
-            processing_mode,
-            section_number,
-            part_number
-        )
+    segment_path = get_section_path(
+        processing_mode,
+        section_number,
+        part_number
     )
 
-    chosen_prompt = (
-        resolve_audio_prompt(
-            language_id,
-            audio_prompt_path_input
-        )
+    chosen_prompt = resolve_audio_prompt(
+        language_id,
+        audio_prompt_path_input
     )
 
     generate_kwargs = {
-
-        "exaggeration":
-            float(exaggeration_input),
-
-        "temperature":
-            float(temperature_input),
-
-        "cfg_weight":
-            float(cfgw_input)
-
+        "exaggeration": float(exaggeration_input),
+        "temperature": float(temperature_input),
+        "cfg_weight": float(cfgw_input)
     }
 
     if chosen_prompt:
 
-        generate_kwargs[
-            "audio_prompt_path"
-        ] = chosen_prompt
+        generate_kwargs["audio_prompt_path"] = chosen_prompt
 
-    fixed_seed = int(
-        seed_num_input
-    )
+    fixed_seed = int(seed_num_input)
 
-    set_seed(
-        fixed_seed
-    )
+    set_seed(fixed_seed)
 
     print("")
     print("=" * 60)
@@ -1299,27 +1259,21 @@ def regenerate_tts_part(
     print("=" * 60)
 
     print(
-        f"Modo: "
-        f"{processing_mode}"
+        f"Modo: {processing_mode}"
     )
 
     print(
-        f"Sección: "
-        f"{section_number}"
+        f"Sección: {section_number}"
     )
 
     print(
-        f"Parte: "
-        f"{part_number}"
+        f"Parte: {part_number}"
     )
 
-    wav = (
-        current_model.generate(
-            selected_text,
-            language_id=
-                language_id,
-            **generate_kwargs
-        )
+    wav = current_model.generate(
+        selected_text,
+        language_id=language_id,
+        **generate_kwargs
     )
 
     audio = (
@@ -1331,15 +1285,9 @@ def regenerate_tts_part(
     )
 
     torchaudio.save(
-
         segment_path,
-
-        torch.from_numpy(
-            audio
-        ).unsqueeze(0),
-
+        torch.from_numpy(audio).unsqueeze(0),
         current_model.sr
-
     )
 
     print(
@@ -1349,7 +1297,348 @@ def regenerate_tts_part(
 
     return segment_path
 
-CUSTOM_CSS = """
+
+# =========================================================
+# BATCH REGENERATE
+# =========================================================
+
+def batch_regenerate_tts_parts(
+    selected_items,
+    processing_mode,
+    language_id,
+    audio_prompt_path_input,
+    exaggeration_input,
+    temperature_input,
+    seed_num_input,
+    cfgw_input
+):
+
+    if not selected_items:
+        raise ValueError(
+            "No seleccionaste ninguna parte."
+        )
+
+    current_model = get_or_load_model()
+
+    project = load_project()
+
+    if not project:
+        raise ValueError(
+            "No hay ningún proyecto guardado."
+        )
+
+    chosen_prompt = resolve_audio_prompt(
+        language_id,
+        audio_prompt_path_input
+    )
+
+    generate_kwargs = {
+        "exaggeration": float(exaggeration_input),
+        "temperature": float(temperature_input),
+        "cfg_weight": float(cfgw_input)
+    }
+
+    if chosen_prompt:
+        generate_kwargs["audio_prompt_path"] = chosen_prompt
+
+    fixed_seed = int(seed_num_input)
+
+    generated = 0
+    errors = []
+
+    print("")
+    print("=" * 60)
+    print("REGENERACIÓN MÚLTIPLE")
+    print("=" * 60)
+
+    for item in selected_items:
+
+        try:
+
+            section_number = int(item[0])
+            part_number = int(item[1])
+
+            selected_text = None
+
+            for section in project.get("sections", []):
+
+                if int(section.get("number", 0)) != section_number:
+                    continue
+
+                for part in section.get("parts", []):
+
+                    if int(part.get("number", 0)) == part_number:
+
+                        selected_text = part.get("text")
+                        break
+
+                break
+
+            if not selected_text:
+
+                raise ValueError(
+                    "No se encontró el texto."
+                )
+
+            segment_path = get_section_path(
+                processing_mode,
+                section_number,
+                part_number
+            )
+
+            set_seed(fixed_seed)
+
+            print(
+                f"Regenerando "
+                f"{get_section_label(processing_mode)} "
+                f"{section_number} "
+                f"Parte {part_number}"
+            )
+
+            wav = current_model.generate(
+                selected_text,
+                language_id=language_id,
+                **generate_kwargs
+            )
+
+            audio = (
+                wav.squeeze(0)
+                .detach()
+                .cpu()
+                .numpy()
+                .astype(np.float32)
+            )
+
+            torchaudio.save(
+                segment_path,
+                torch.from_numpy(audio).unsqueeze(0),
+                current_model.sr
+            )
+
+            generated += 1
+
+            print(
+                f"[OK] "
+                f"{os.path.basename(segment_path)}"
+            )
+
+        except Exception as e:
+
+            error_text = (
+                f"{item}: {str(e)}"
+            )
+
+            errors.append(error_text)
+
+            print(
+                f"[ERROR] {error_text}"
+            )
+
+            continue
+
+    message = (
+        f"Regeneración terminada. "
+        f"{generated} parte(s) procesada(s)."
+    )
+
+    if errors:
+
+        message += (
+            f" {len(errors)} con error."
+        )
+
+    return message
+
+
+# =========================================================
+# JOIN SECTION
+# =========================================================
+
+def join_section_audio(
+    processing_mode,
+    section_number
+):
+
+    project = load_project()
+
+    if not project:
+        raise ValueError(
+            "No hay ningún proyecto guardado."
+        )
+
+    section_number = int(section_number)
+
+    selected_section = None
+
+    for section in project.get("sections", []):
+
+        if int(section.get("number", 0)) == section_number:
+
+            selected_section = section
+            break
+
+    if selected_section is None:
+
+        raise ValueError(
+            "No se encontró la sección."
+        )
+
+    parts = selected_section.get(
+        "parts",
+        []
+    )
+
+    if not parts:
+
+        raise ValueError(
+            "La sección no tiene partes."
+        )
+
+    audio_parts = []
+
+    sample_rate = None
+
+    for part in parts:
+
+        part_number = int(
+            part.get("number", 0)
+        )
+
+        part_path = get_section_path(
+            processing_mode,
+            section_number,
+            part_number
+        )
+
+        if not os.path.exists(part_path):
+
+            raise ValueError(
+                f"Falta el audio de la "
+                f"Parte {part_number}."
+            )
+
+        waveform, sr = torchaudio.load(
+            part_path
+        )
+
+        if sample_rate is None:
+
+            sample_rate = sr
+
+        elif sr != sample_rate:
+
+            raise ValueError(
+                "Las partes tienen distintas "
+                "frecuencias de muestreo."
+            )
+
+        audio_parts.append(
+            waveform
+        )
+
+    joined_audio = torch.cat(
+        audio_parts,
+        dim=1
+    )
+
+    os.makedirs(
+        SEGMENTS_DIR,
+        exist_ok=True
+    )
+
+    prefix = get_section_label(
+        processing_mode
+    )
+
+    final_filename = (
+        f"{prefix}_"
+        f"{section_number:03d}.wav"
+    )
+
+    final_path = os.path.join(
+        SEGMENTS_DIR,
+        final_filename
+    )
+
+    torchaudio.save(
+        final_path,
+        joined_audio,
+        sample_rate
+    )
+
+    print("")
+    print(
+        f"[UNIDO] {final_filename}"
+    )
+
+    return final_path
+
+
+# =========================================================
+# PROJECT STATUS
+# =========================================================
+
+def get_project_status(
+    processing_mode
+):
+
+    project = load_project()
+
+    if not project:
+
+        return (
+            "🟡 **Sin proyecto generado todavía.**"
+        )
+
+    sections = project.get(
+        "sections",
+        []
+    )
+
+    label = get_section_label(
+        processing_mode
+    )
+
+    total_parts = 0
+    generated_parts = 0
+    missing_parts = 0
+
+    for section in sections:
+
+        for part in section.get(
+            "parts",
+            []
+        ):
+
+            total_parts += 1
+
+            part_number = int(
+                part["number"]
+            )
+
+            section_number = int(
+                section["number"]
+            )
+
+            path = get_section_path(
+                processing_mode,
+                section_number,
+                part_number
+            )
+
+            if os.path.exists(path):
+
+                generated_parts += 1
+
+            else:
+
+                missing_parts += 1
+
+    return (
+        f"🟢 **{label}s:** {len(sections)}  \n"
+        f"🎧 **Partes generadas:** {generated_parts} / {total_parts}  \n"
+        f"⏳ **Partes faltantes:** {missing_parts}"
+    )
 /* ===== GLOBAL ===== */
 
 body {
@@ -1472,7 +1761,7 @@ body {
     border: 1px solid #252a31 !important;
     border-radius: 10px !important;
 }
-"""
+
 
 
 with gr.Blocks(
@@ -1498,7 +1787,7 @@ with gr.Blocks(
     # =====================================================
 
     saved_project = load_project()
-
+    panel_refresh = gr.State(0)
     initial_lang = "es"
 
     initial_processing_mode = (
@@ -1729,34 +2018,45 @@ with gr.Blocks(
             # =============================================
 
             gr.HTML(
-                '<div class="cm-section-title">🎚️ PARTES GENERADAS</div>'
+                '<div class="cm-section-title">'
+                '🎚️ PRODUCCIÓN DE AUDIO'
+                '</div>'
             )
 
-            with gr.Group(elem_classes="cm-audio-panel"):
+            with gr.Group(
+                elem_classes="cm-audio-panel"
+            ):
 
                 gr.Markdown(
                     """
-                    ### Panel de audios
+                    ### 🎧 Revisión y producción
 
                     <span class="cm-muted">
-                    Cada párrafo será organizado por partes.
-                    Desde aquí podremos reproducir y regenerar
-                    segmentos individuales.
+                    Revisá cada parte antes de unir el párrafo
+                    o la escena. Podés regenerar partes individuales
+                    o seleccionar varias para regenerarlas juntas.
                     </span>
                     """
                 )
 
-                gr.Markdown(
-                    """
-                    ℹ️ El panel dinámico de audios se agregará
-                    en el siguiente paso.
-                    """
+                with gr.Row():
+
+                    batch_regenerate_btn = gr.Button(
+                        "🔄 Regenerar seleccionadas",
+                        variant="primary",
+                        elem_classes="cm-secondary"
+                    )
+
+                    refresh_panel_btn = gr.Button(
+                        "↻ Actualizar panel",
+                        elem_classes="cm-secondary"
+                    )
+
+                panel_status = gr.Markdown(
+                    get_project_status(
+                        initial_processing_mode
+                    )
                 )
-
-
-    # =====================================================
-    # EVENTS
-    # =====================================================
 
     def on_voice_change(voice_name):
         return voice_choices.get(voice_name)
