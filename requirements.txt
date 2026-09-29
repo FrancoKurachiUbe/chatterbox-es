@@ -1,0 +1,18 @@
+# =============================================================================
+# Crónicas Mundiales — Narration Studio
+# Dependencias para Python (Windows / Linux / macOS)
+# =============================================================================
+
+# Framework de interfaz y API
+fastapi>=0.100.0
+uvicorn[standard]>=0.22.0
+gradio>=4.0.0
+pydantic>=2.0.0
+
+# Motor de audio y Machine Learning
+torch>=2.0.0
+torchaudio>=2.0.0
+numpy>=1.24.0
+
+# Motor TTS (instalar desde repo de Chatterbox o pip)
+# pip install chatterbox-tts  (o instalar chatterbox localmente)

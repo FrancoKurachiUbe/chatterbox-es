@@ -1,0 +1,6 @@
+{
+  "name": "Crónicas Mundiales — Narration Studio",
+  "description": "Multilingual TTS narration studio for scripts, scenes, and paragraphs with voice cloning reference, number normalization, and audio assembly.",
+  "permissions": [],
+  "capabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
