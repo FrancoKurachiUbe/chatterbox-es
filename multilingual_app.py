@@ -1545,23 +1545,23 @@ with gr.Blocks(
         with gr.Column(scale=5):
 
             gr.HTML(
-    '<div class="cm-section-title">🎬 MODO DE PROCESAMIENTO</div>'
+                '<div class="cm-section-title">🎬 MODO DE PROCESAMIENTO</div>'
 )
 
-with gr.Group(elem_classes="cm-card"):
+            with gr.Group(elem_classes="cm-card"):
 
-            processing_mode = gr.Radio(
-                choices=[
-                    ("📄 Por párrafos", "paragraph"),
-                    ("🎬 Por escenas", "scene")
-                ],
-                value=initial_processing_mode
-                label="Cómo organizar el guion",
-                info=(
-                    "Por párrafos usa líneas en blanco. "
-                    "Por escenas usa encabezados ESCENA 1 — Título."
+                processing_mode = gr.Radio(
+                    choices=[
+                        ("📄 Por párrafos", "paragraph"),
+                        ("🎬 Por escenas", "scene")
+                    ],
+                    value=initial_processing_mode,
+                    label="Cómo organizar el guion",
+                    info=(
+                        "Por párrafos usa líneas en blanco. "
+                        "Por escenas usa encabezados ESCENA 1 — Título."
+                    )
                 )
-            )
 
             gr.HTML(
                 '<div class="cm-section-title">📝 GUION</div>'
