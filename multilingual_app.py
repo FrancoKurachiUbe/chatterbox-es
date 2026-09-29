@@ -2,8 +2,8 @@
 # -*- coding: utf-8 -*-
 """
 =============================================================================
-CRÓNICAS MUNDIALES — NARRATION STUDIO
-Backend Python & API Local para Frontend Moderno y Gradio Fallback
+CHATTERBOX PRIME — AI NARRATION STUDIO
+Backend Python & API Local para Estudio Profesional de Narración
 Basado en Chatterbox Multilingual TTS con PyTorch y procesamiento local.
 =============================================================================
 """
@@ -18,6 +18,8 @@ import subprocess
 import threading
 import time
 import argparse
+import shutil
+import inspect
 from pathlib import Path
 from typing import List, Dict, Tuple, Optional, Any
 
@@ -32,10 +34,11 @@ except ImportError as e:
     print("👉 Asegúrate de ejecutar este script con el entorno virtual que contiene PyTorch.")
     print("   Ejemplo: D:\\chatterbox-master\\.venv\\Scripts\\python.exe multilingual_app.py")
     print("=" * 65 + "\n")
-    try:
-        input("Presiona Enter para continuar...")
-    except Exception:
-        pass
+    if sys.platform == 'win32' and hasattr(sys.stdin, 'isatty') and sys.stdin.isatty():
+        try:
+            input("Presiona Enter para continuar...")
+        except Exception:
+            pass
     sys.exit(1)
 
 # Intento de importar Chatterbox Multilingual TTS
@@ -53,11 +56,13 @@ except ImportError:
     }
 
 # =============================================================================
-# 1. CONFIGURACIÓN DEL SISTEMA Y HARDWARE
+# 1. CONFIGURACIÓN DEL SISTEMA Y HARDWARE (CPU / CUDA AUTOMÁTICO)
 # =============================================================================
 
-DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
-DEVICE_LABEL = f"🚀 CUDA ({torch.cuda.get_device_name(0)})" if torch.cuda.is_available() else "💻 CPU (AMD/Intel)"
+# Detección automática interna de hardware: CPU actual y preparado para CUDA/GPU futura
+CUDA_AVAILABLE = torch.cuda.is_available()
+DEVICE = "cuda" if CUDA_AVAILABLE else "cpu"
+DEVICE_LABEL = f"CUDA ({torch.cuda.get_device_name(0)})" if CUDA_AVAILABLE else "CPU"
 T3_MODEL = os.getenv("CHATTERBOX_MULTILINGUAL_T3_MODEL", "v2")
 
 # Rutas del proyecto usando pathlib
@@ -65,14 +70,16 @@ BASE_DIR = Path(__file__).resolve().parent
 VOICES_DIR = BASE_DIR / "voices"
 OUTPUTS_DIR = BASE_DIR / "outputs"
 SEGMENTS_DIR = OUTPUTS_DIR / "segments"
+FINAL_DIR = OUTPUTS_DIR / "final"
 PROJECT_FILE = OUTPUTS_DIR / "project.json"
 
 # Asegurar existencia de directorios básicos
 VOICES_DIR.mkdir(parents=True, exist_ok=True)
 OUTPUTS_DIR.mkdir(parents=True, exist_ok=True)
 SEGMENTS_DIR.mkdir(parents=True, exist_ok=True)
+FINAL_DIR.mkdir(parents=True, exist_ok=True)
 
-# Parámetros predeterminados para producción
+# Parámetros predeterminados para producción según especificación Chatterbox Prime
 DEFAULT_SEED = 737219296
 DEFAULT_EXAGGERATION = 0.35
 DEFAULT_TEMPERATURE = 0.55
@@ -81,12 +88,13 @@ MAX_CHARS = 250
 PREFERRED_VOICE = "Brian Warm Clonacion Voz"
 
 # =============================================================================
-# 2. GESTIÓN DE MODELO (CARGA LAZY / SINGLETON)
+# 2. GESTIÓN DE MODELO (CARGA LAZY / SINGLETON Y VERIFICACIÓN V2/V3)
 # =============================================================================
 
 MODEL: Optional[Any] = None
-MODEL_STATUS = f"⚪ Modelo no cargado ({DEVICE.upper()})"
+MODEL_STATUS = "⚪ Modelo no cargado"
 GENERATION_LOCK = threading.Lock()
+CANCEL_REQUESTED = False
 
 # Estado global de la cola de generación para el Frontend moderno
 GENERATION_STATE: Dict[str, Any] = {
@@ -98,6 +106,58 @@ GENERATION_STATE: Dict[str, Any] = {
     "errors": [],
     "last_generated": None,
 }
+
+
+def inspect_chatterbox_installation() -> Dict[str, Any]:
+    """
+    Inspecciona rigurosamente la versión instalada de Chatterbox y comprueba
+    su compatibilidad real con V3 antes de intentar cargar cualquier variante.
+    """
+    info: Dict[str, Any] = {
+        "installed": ChatterboxMultilingualTTS is not None,
+        "version": "No instalada",
+        "has_t3_param": False,
+        "v3_compatible": False,
+        "active_model_version": "v2",
+        "device": DEVICE,
+        "cuda_available": CUDA_AVAILABLE,
+        "gpu_name": torch.cuda.get_device_name(0) if CUDA_AVAILABLE else None,
+    }
+
+    try:
+        import chatterbox
+        info["version"] = getattr(chatterbox, "__version__", "instalada (local/git)")
+    except Exception:
+        pass
+
+    if ChatterboxMultilingualTTS is not None:
+        try:
+            sig = inspect.signature(ChatterboxMultilingualTTS.from_pretrained)
+            info["has_t3_param"] = "t3_model" in sig.parameters
+
+            # Verificar si v3 está soportado en la clase o en los modelos de chatterbox
+            class_repr = repr(ChatterboxMultilingualTTS)
+            source_snippet = ""
+            try:
+                source_snippet = inspect.getsource(ChatterboxMultilingualTTS.from_pretrained)
+            except Exception:
+                pass
+
+            # Si el código o las constantes mencionan explícitamente v3
+            supports_v3 = "v3" in source_snippet.lower() or "t3_v3" in source_snippet.lower()
+            info["v3_compatible"] = supports_v3
+
+            # Usar v3 solo si está verdaderamente soportado o si se configuró explícitamente y es seguro
+            env_target = os.getenv("CHATTERBOX_MULTILINGUAL_T3_MODEL", "v2").lower()
+            if env_target == "v3" and supports_v3:
+                info["active_model_version"] = "v3"
+            else:
+                info["active_model_version"] = "v2"
+        except Exception as e:
+            info["inspect_error"] = str(e)
+            info["active_model_version"] = "v2"
+
+    return info
 
 
 def get_model_status_text() -> str:
@@ -112,6 +172,7 @@ def get_or_load_model(progress_callback: Optional[Any] = None) -> Any:
     """
     Carga el modelo ChatterboxMultilingualTTS de forma lazy si aún no está en memoria.
     Reutiliza la instancia existente para evitar duplicar memoria RAM/VRAM.
+    Verifica compatibilidad de parámetros antes de llamar a from_pretrained.
     """
     global MODEL, MODEL_STATUS
     if MODEL is None:
@@ -120,34 +181,57 @@ def get_or_load_model(progress_callback: Optional[Any] = None) -> Any:
                 "La librería 'chatterbox' no está instalada en el entorno de Python. "
                 "Instálala con: pip install chatterbox-tts"
             )
-        print(f"📦 [Chatterbox] Inicializando modelo en dispositivo: {DEVICE} (T3: {T3_MODEL})...")
+
+        env_info = inspect_chatterbox_installation()
+        print(f"\n📦 [Chatterbox Prime] Verificando instalación: {env_info['version']} en {DEVICE.upper()}...")
+
         if progress_callback:
             try:
                 progress_callback(0.05, desc="Cargando modelo Chatterbox en memoria...")
             except Exception:
                 pass
+
         try:
-            MODEL = ChatterboxMultilingualTTS.from_pretrained(DEVICE, t3_model=T3_MODEL)
+            # Inspeccionar parámetros de from_pretrained
+            sig = inspect.signature(ChatterboxMultilingualTTS.from_pretrained)
+            kwargs: Dict[str, Any] = {}
+
+            if "t3_model" in sig.parameters:
+                # Solo usar V3 si está comprobado en la API real
+                chosen_v = env_info.get("active_model_version", "v2")
+                kwargs["t3_model"] = chosen_v
+                print(f"📦 [Chatterbox Prime] t3_model verificado: {chosen_v}")
+
+            try:
+                MODEL = ChatterboxMultilingualTTS.from_pretrained(DEVICE, **kwargs)
+            except TypeError as te:
+                print(f"⚠️ [Chatterbox Prime] Incompatibilidad de argumentos ({te}). Cargando solo con DEVICE={DEVICE}...")
+                MODEL = ChatterboxMultilingualTTS.from_pretrained(DEVICE)
+
             if hasattr(MODEL, "to") and str(getattr(MODEL, "device", "")) != DEVICE:
                 MODEL.to(DEVICE)
+
             MODEL_STATUS = f"🟢 Modelo cargado en {DEVICE.upper()}"
-            print(f"✅ [Chatterbox] Modelo cargado exitosamente. Dispositivo: {getattr(MODEL, 'device', DEVICE)}")
+            print(f"✅ [Chatterbox Prime] Modelo listo en {getattr(MODEL, 'device', DEVICE)}")
         except Exception as e:
             MODEL_STATUS = f"🔴 Error al cargar modelo: {str(e)}"
-            print(f"❌ [Chatterbox] Error crítico al cargar modelo: {e}")
+            print(f"❌ [Chatterbox Prime] Error crítico al cargar modelo: {e}")
             traceback.print_exc()
             raise RuntimeError(f"No se pudo cargar el modelo Chatterbox: {e}")
+
     return MODEL
 
 
 def set_seed(seed: int) -> None:
-    """Establece la semilla para garantizar reproducibilidad exacta."""
+    """
+    Establece la semilla para garantizar reproducibilidad exacta.
+    Elimina cualquier creación de logs TXT innecesarios.
+    """
     torch.manual_seed(seed)
-    if DEVICE == "cuda":
-        torch.cuda.manual_seed(seed)
+    if torch.cuda.is_available():
         torch.cuda.manual_seed_all(seed)
+    np.random.seed(seed % (2**32 - 1))
     random.seed(seed)
-    np.random.seed(seed)
 
 
 # =============================================================================
@@ -157,7 +241,7 @@ def set_seed(seed: int) -> None:
 def get_voice_files() -> List[Path]:
     """Obtiene la lista ordenada de archivos WAV en la carpeta voices."""
     VOICES_DIR.mkdir(parents=True, exist_ok=True)
-    return sorted(list(VOICES_DIR.glob("*.wav")))
+    return sorted(list(VOICES_DIR.glob("*.wav")), key=lambda p: p.stem.lower())
 
 
 def get_voice_choices() -> Dict[str, str]:
@@ -172,8 +256,8 @@ def get_voice_choices() -> Dict[str, str]:
 LANGUAGE_CONFIG: Dict[str, Dict[str, str]] = {
     "ar": {
         "name": "Árabe",
-        "audio": "https://storage.googleapis.com/chatterbox-demo-samples/mtl_prompts/ar_f/ar_prompts2.flac",
-        "text": "في الشهر الماضي، وصلنا إلى معلم جديد بمليارين من المشاهدات على قناتنا على يوتيوب."
+        "audio": "https://storage.googleapis.com/chatterbox-demo-samples/mtl_prompts/ar_f.flac",
+        "text": "في الشهر الماضي وصلنا إلى معلم جديد: ملياري مشاهدة على قناتنا على يوتيوب."
     },
     "da": {
         "name": "Danés",
@@ -182,18 +266,18 @@ LANGUAGE_CONFIG: Dict[str, Dict[str, str]] = {
     },
     "de": {
         "name": "Alemán",
-        "audio": "https://storage.googleapis.com/chatterbox-demo-samples/mtl_prompts/de_f1.flac",
+        "audio": "https://storage.googleapis.com/chatterbox-demo-samples/mtl_prompts/de_m.flac",
         "text": "Letzten Monat haben wir einen neuen Meilenstein erreicht: zwei Milliarden Aufrufe auf unserem YouTube-Kanal."
     },
     "el": {
         "name": "Griego",
         "audio": "https://storage.googleapis.com/chatterbox-demo-samples/mtl_prompts/el_m.flac",
-        "text": "Τον περασμένο μήνα, φτάσαμε σε ένα νέο ορόσημο με δύο δισεκατομμύρια προβολές στο κανάλι μας στο YouTube."
+        "text": "Τον περασμένο μήνα φτάσαμε σε ένα νέο ορόσημο: δύο δισεκατομμύρια προβολές στο κανάλι μας στο YouTube."
     },
     "en": {
         "name": "Inglés",
         "audio": "https://storage.googleapis.com/chatterbox-demo-samples/mtl_prompts/en_f1.flac",
-        "text": "Last month, we reached a new milestone with two billion views on our YouTube channel."
+        "text": "Last month we reached a new milestone: two billion views on our YouTube channel."
     },
     "es": {
         "name": "Español",
@@ -369,7 +453,11 @@ def number_to_spanish(n: int) -> str:
     return str(n)
 
 
-def normalize_numbers_for_tts(text: str, language_id: str) -> str:
+def normalize_numbers_for_tts(text: str, language_id: str = "es") -> str:
+    """
+    Convierte internamente números a español para la síntesis de voz,
+    conservando intacto el texto original visible en el editor.
+    """
     if language_id != "es":
         return text
 
@@ -387,98 +475,130 @@ def normalize_numbers_for_tts(text: str, language_id: str) -> str:
 
 
 # =============================================================================
-# 5. SEGMENTACIÓN INTELIGENTE DE GUION (LÍMITE ~250 CARACTERES)
+# 5. SEGMENTACIÓN INTELIGENTE JERÁRQUICA (PÁRRAFO -> ORACIÓN -> PALABRA)
 # =============================================================================
 
 def split_text_for_tts(text: str, max_chars: int = MAX_CHARS) -> List[str]:
+    """
+    Divide el texto en partes de aproximadamente max_chars (~250 caracteres) siguiendo la jerarquía:
+    1. Párrafo
+    2. Oración (delimitada por signos de puntuación: . ! ? ; o saltos de línea)
+    3. Palabra (si una sola oración supera max_chars)
+
+    Evita cortar oraciones y nunca corta palabras innecesariamente.
+    """
     text = text.strip()
     if not text:
         return []
 
-    sentences = re.findall(r".+?(?:[.!?]+(?=\s|$)|$)", text, flags=re.DOTALL)
+    # 1. Separar por párrafos
+    paragraphs = [p.strip() for p in re.split(r"\n+", text) if p.strip()]
     chunks: List[str] = []
-    current_chunk = ""
 
-    for sentence in sentences:
-        sentence = sentence.strip()
-        if not sentence:
+    for paragraph in paragraphs:
+        # Si el párrafo cabe en el límite, se conserva entero
+        if len(paragraph) <= max_chars:
+            chunks.append(paragraph)
             continue
 
-        if len(sentence) > max_chars:
-            if current_chunk:
-                chunks.append(current_chunk.strip())
-                current_chunk = ""
+        # 2. Dividir en oraciones respetando puntuación
+        raw_sentences = re.findall(r'[^.!?;\n]+(?:[.!?;\n]+["\']?|$)', paragraph)
+        sentences = [s.strip() for s in raw_sentences if s.strip()]
 
-            words = sentence.split()
-            word_chunk = ""
+        current_chunk = ""
 
-            for word in words:
-                candidate = f"{word_chunk} {word}".strip()
-                if len(candidate) <= max_chars:
-                    word_chunk = candidate
-                else:
-                    if word_chunk:
-                        chunks.append(word_chunk.strip())
-                    word_chunk = word
+        for sentence in sentences:
+            # Caso 2A: Si la oración en sí sola supera max_chars, dividir por palabras sin cortar palabras
+            if len(sentence) > max_chars:
+                if current_chunk:
+                    chunks.append(current_chunk.strip())
+                    current_chunk = ""
 
-            if word_chunk:
-                chunks.append(word_chunk.strip())
-            continue
+                words = sentence.split()
+                word_chunk = ""
+                for word in words:
+                    candidate = f"{word_chunk} {word}".strip() if word_chunk else word
+                    if len(candidate) <= max_chars:
+                        word_chunk = candidate
+                    else:
+                        if word_chunk:
+                            chunks.append(word_chunk.strip())
+                        word_chunk = word
+                if word_chunk:
+                    current_chunk = word_chunk
+                continue
 
-        candidate = f"{current_chunk} {sentence}".strip()
-        if len(candidate) <= max_chars:
-            current_chunk = candidate
-        else:
-            if current_chunk:
-                chunks.append(current_chunk.strip())
-            current_chunk = sentence
+            # Caso 2B: Acumular oraciones completas mientras no superen max_chars
+            candidate = f"{current_chunk} {sentence}".strip() if current_chunk else sentence
+            if len(candidate) <= max_chars:
+                current_chunk = candidate
+            else:
+                if current_chunk:
+                    chunks.append(current_chunk.strip())
+                current_chunk = sentence
 
-    if current_chunk:
-        chunks.append(current_chunk.strip())
+        if current_chunk:
+            chunks.append(current_chunk.strip())
 
     return chunks
 
 
 # =============================================================================
-# 6. PARSERS DE PÁRRAFOS Y ESCENAS
+# 6. PARSERS ROBUSTOS DE PÁRRAFOS Y ESCENAS
 # =============================================================================
 
 def parse_paragraphs_from_script(text_input: str) -> List[Dict[str, Any]]:
+    """
+    Parsea el guion separándolo por párrafos (líneas en blanco).
+    """
     text_input = text_input.replace("\r\n", "\n").replace("\r", "\n").strip()
     if not text_input:
-        raise ValueError("El guion está vacío. Por favor introduce texto para continuar.")
+        raise ValueError("El guion está vacío. Introduce texto para continuar.")
 
     paragraphs = re.split(r"\n\s*\n", text_input)
     result = []
     number = 1
 
-    for paragraph in paragraphs:
-        p_text = paragraph.strip()
+    for p in paragraphs:
+        p_text = p.strip()
         if not p_text:
             continue
         result.append({
             "number": number,
-            "title": "",
+            "title": f"Párrafo {number}",
             "text": p_text
         })
         number += 1
 
     if not result:
-        raise ValueError("No se encontraron párrafos válidos en el texto.")
+        result.append({
+            "number": 1,
+            "title": "Párrafo 1",
+            "text": text_input
+        })
     return result
 
 
 def parse_scenes_from_script(text_input: str) -> List[Dict[str, Any]]:
+    """
+    Parsea el guion detectando 'ESCENA 1', 'ESCENA 2', etc.
+    Permite texto introductorio antes de la primera escena sin error (lo asigna a la Escena 1).
+    Soporta múltiples variantes: ESCENA 1, Escena 01, ESCENA 1: Título, ESCENA 1 — Título, CAPÍTULO 1, etc.
+    Corrige definitivamente cualquier fallo de generación de la Escena 1.
+    """
     text_input = text_input.replace("\r\n", "\n").replace("\r", "\n").strip()
     if not text_input:
-        raise ValueError("El guion está vacío. Por favor introduce texto para continuar.")
+        raise ValueError("El guion está vacío. Introduce texto para continuar.")
 
     lines = text_input.split("\n")
-    scene_pattern = re.compile(r"^\s*ESCENA\s+(\d+)(?:\s*[—–:-]\s*(.*))?\s*$", re.IGNORECASE)
+    scene_pattern = re.compile(
+        r"^\s*(?:ESCENA|Escena|SCENE|Scene|CAPÍTULO|Capítulo|PARTE|Parte)\s+(\d+)(?:\s*[—–:\-\.]\s*(.*))?\s*$",
+        re.IGNORECASE
+    )
 
     scenes: List[Dict[str, Any]] = []
     current_scene: Optional[Dict[str, Any]] = None
-    content_before_first_scene: List[str] = []
+    pre_scene_lines: List[str] = []
 
     for line in lines:
         match = scene_pattern.match(line)
@@ -486,42 +606,69 @@ def parse_scenes_from_script(text_input: str) -> List[Dict[str, Any]]:
             if current_scene is not None:
                 current_scene["text"] = "\n".join(current_scene["text_lines"]).strip()
                 del current_scene["text_lines"]
-                scenes.append(current_scene)
+                if current_scene["text"]:
+                    scenes.append(current_scene)
 
-            scene_number = int(match.group(1))
+            scene_num = int(match.group(1))
             scene_title = (match.group(2) or "").strip()
             current_scene = {
-                "number": scene_number,
+                "number": scene_num,
                 "title": scene_title,
                 "text_lines": []
             }
         else:
             if current_scene is not None:
                 current_scene["text_lines"].append(line)
-            elif line.strip():
-                content_before_first_scene.append(line.strip())
+            else:
+                if line.strip():
+                    pre_scene_lines.append(line)
 
     if current_scene is not None:
         current_scene["text"] = "\n".join(current_scene["text_lines"]).strip()
         del current_scene["text_lines"]
-        scenes.append(current_scene)
+        if current_scene["text"]:
+            scenes.append(current_scene)
 
-    if content_before_first_scene:
-        raise ValueError(
-            "Hay texto antes de la primera escena. El guion debe comenzar con 'ESCENA 1 — Título'."
-        )
+    # Si había texto introductorio antes de la primera escena, unirlo sin arrojar error destructivo
+    if pre_scene_lines:
+        intro_text = "\n".join(pre_scene_lines).strip()
+        if not scenes:
+            scenes.append({
+                "number": 1,
+                "title": "Escena 1",
+                "text": intro_text
+            })
+        else:
+            if scenes[0]["number"] == 1:
+                scenes[0]["text"] = f"{intro_text}\n\n{scenes[0]['text']}".strip()
+            else:
+                scenes.insert(0, {
+                    "number": 1,
+                    "title": "Introducción",
+                    "text": intro_text
+                })
 
     if not scenes:
-        raise ValueError("No se encontraron escenas. Usa el formato 'ESCENA 1 — Título'.")
+        scenes.append({
+            "number": 1,
+            "title": "Escena 1",
+            "text": text_input
+        })
 
-    for s in scenes:
-        if not s["text"]:
-            raise ValueError(f"La ESCENA {s['number']} no contiene texto de narración.")
+    # Renumerar secuencialmente de forma segura
+    for idx, s in enumerate(scenes):
+        s["number"] = idx + 1
+        if not s.get("title"):
+            s["title"] = f"Escena {s['number']}"
 
     return scenes
 
 
 def build_project_structure(text_input: str, processing_mode: str, language_id: str) -> List[Dict[str, Any]]:
+    """
+    Construye la estructura completa del proyecto en base al texto y al modo (scene / paragraph).
+    Ambos modos comparten exactamente la misma lógica de división y generación.
+    """
     if processing_mode == "scene":
         sections = parse_scenes_from_script(text_input)
     else:
@@ -529,24 +676,44 @@ def build_project_structure(text_input: str, processing_mode: str, language_id: 
 
     processed_sections = []
     for s in sections:
+        # Texto normalizado fonéticamente con números en español para TTS
         norm_text = normalize_numbers_for_tts(s["text"], language_id)
-        parts = split_text_for_tts(norm_text, max_chars=MAX_CHARS)
+
+        # División inteligente en bloques de ~250 caracteres
+        norm_parts = split_text_for_tts(norm_text, max_chars=MAX_CHARS)
+        raw_parts = split_text_for_tts(s["text"], max_chars=MAX_CHARS)
+
+        parts_list = []
+        for idx, n_part in enumerate(norm_parts):
+            raw_display = raw_parts[idx] if idx < len(raw_parts) else n_part
+            p_num = idx + 1
+            filename = get_section_filename(processing_mode, s["number"], p_num)
+            part_path = get_section_path(processing_mode, s["number"], p_num)
+            has_audio = part_path.exists() and part_path.stat().st_size > 44
+
+            parts_list.append({
+                "number": p_num,
+                "text": raw_display,              # Visible para el usuario
+                "normalized_text": n_part,        # Usado para síntesis TTS
+                "audio_filename": filename,
+                "audio_url": f"/outputs/segments/{filename}" if has_audio else None,
+                "has_audio": has_audio,
+                "status": "Listo" if has_audio else "Pendiente"
+            })
 
         processed_sections.append({
             "number": s["number"],
-            "title": s.get("title", ""),
+            "title": s.get("title", f"{get_section_label(processing_mode)} {s['number']}"),
             "text": s["text"],
             "normalized_text": norm_text,
-            "parts": [
-                {"number": idx + 1, "text": part}
-                for idx, part in enumerate(parts)
-            ]
+            "parts": parts_list
         })
+
     return processed_sections
 
 
 # =============================================================================
-# 7. PERSISTENCIA DEL PROYECTO (JSON)
+# 7. PERSISTENCIA DEL PROYECTO (JSON) Y AUTOSAVE
 # =============================================================================
 
 def save_project(
@@ -557,7 +724,8 @@ def save_project(
     exaggeration_input: float = DEFAULT_EXAGGERATION,
     temperature_input: float = DEFAULT_TEMPERATURE,
     seed_num_input: int = DEFAULT_SEED,
-    cfgw_input: float = DEFAULT_CFG_WEIGHT
+    cfgw_input: float = DEFAULT_CFG_WEIGHT,
+    voice_name_input: Optional[str] = PREFERRED_VOICE
 ) -> Dict[str, Any]:
     OUTPUTS_DIR.mkdir(parents=True, exist_ok=True)
     sections = build_project_structure(text_input, processing_mode, language_id)
@@ -565,8 +733,10 @@ def save_project(
     project = {
         "last_script": text_input,
         "processing_mode": processing_mode,
+        "voice_name": voice_name_input or PREFERRED_VOICE,
         "settings": {
             "language": language_id,
+            "voice_name": voice_name_input or PREFERRED_VOICE,
             "audio_prompt_path": audio_prompt_path_input,
             "exaggeration": float(exaggeration_input),
             "temperature": float(temperature_input),
@@ -599,7 +769,7 @@ def load_project() -> Optional[Dict[str, Any]]:
 
 
 # =============================================================================
-# 8. RUTAS Y NOMBRES DE ARCHIVOS
+# 8. RUTAS Y NOMBRES DE ARCHIVOS EXACTOS
 # =============================================================================
 
 def get_section_label(processing_mode: str) -> str:
@@ -607,6 +777,7 @@ def get_section_label(processing_mode: str) -> str:
 
 
 def get_section_filename(processing_mode: str, section_number: int, part_number: int) -> str:
+    """Nombres exactos: Parrafo_001_Parte_01.wav o Escena_001_Parte_01.wav"""
     prefix = get_section_label(processing_mode)
     return f"{prefix}_{section_number:03d}_Parte_{part_number:02d}.wav"
 
@@ -618,13 +789,14 @@ def get_section_path(processing_mode: str, section_number: int, part_number: int
 
 
 def get_final_joined_path(processing_mode: str, section_number: int) -> Path:
+    """Nombres exactos: Parrafo_001.wav o Escena_001.wav"""
     SEGMENTS_DIR.mkdir(parents=True, exist_ok=True)
     prefix = get_section_label(processing_mode)
     return SEGMENTS_DIR / f"{prefix}_{section_number:03d}.wav"
 
 
 # =============================================================================
-# 9. GENERACIÓN Y SÍNTESIS DE AUDIO (SECUENCIAL Y THREAD-SAFE)
+# 9. GENERACIÓN Y SÍNTESIS DE AUDIO (CONTINUACIÓN, CANCELACIÓN Y RESISTENCIA A ERRORES)
 # =============================================================================
 
 def generate_tts_audio(
@@ -636,9 +808,17 @@ def generate_tts_audio(
     temperature_input: float = DEFAULT_TEMPERATURE,
     seed_num_input: int = DEFAULT_SEED,
     cfgw_input: float = DEFAULT_CFG_WEIGHT,
+    voice_name_input: Optional[str] = PREFERRED_VOICE,
     progress: Optional[Any] = None
 ) -> Optional[str]:
-    global GENERATION_STATE
+    """
+    Analiza el guion, muestra párrafos/escenas y sus partes.
+    Genera únicamente los archivos faltantes, conservando los existentes.
+    Permite continuar una producción incompleta.
+    Protección contra doble generación y soporte para cancelación en vivo.
+    """
+    global GENERATION_STATE, CANCEL_REQUESTED
+    CANCEL_REQUESTED = False
 
     if not text_input or not text_input.strip():
         raise ValueError("El guion está vacío. Introduce texto antes de generar.")
@@ -646,7 +826,7 @@ def generate_tts_audio(
     with GENERATION_LOCK:
         GENERATION_STATE["is_generating"] = True
         GENERATION_STATE["errors"] = []
-        GENERATION_STATE["message"] = "Preparando proyecto..."
+        GENERATION_STATE["message"] = "Analizando guion y preparando estructura..."
 
         try:
             project = save_project(
@@ -657,7 +837,8 @@ def generate_tts_audio(
                 exaggeration_input=exaggeration_input,
                 temperature_input=temperature_input,
                 seed_num_input=seed_num_input,
-                cfgw_input=cfgw_input
+                cfgw_input=cfgw_input,
+                voice_name_input=voice_name_input
             )
 
             current_model = get_or_load_model(progress_callback=progress)
@@ -686,15 +867,22 @@ def generate_tts_audio(
             total_skipped = 0
             last_generated_path: Optional[str] = None
 
-            print("\n" + "=" * 60)
-            print(f"🎬 INICIANDO GENERACIÓN: {'ESCENAS' if processing_mode == 'scene' else 'PÁRRAFOS'}")
-            print(f"Total partes: {total_count} | Seed: {fixed_seed} | Dispositivo: {DEVICE}")
-            print("=" * 60)
+            print("\n" + "=" * 65)
+            print("🎬 [CHATTERBOX PRIME] INICIANDO PRODUCCIÓN DE AUDIO")
+            print(f"Modo: {'ESCENAS' if processing_mode == 'scene' else 'PÁRRAFOS'} | Total partes: {total_count}")
+            print(f"Seed: {fixed_seed} (fijo) | Dispositivo: {DEVICE.upper()} (CUDA: {CUDA_AVAILABLE})")
+            print("=" * 65)
 
             for idx, (sec, part, segment_path) in enumerate(all_parts_to_process):
+                if CANCEL_REQUESTED:
+                    print("🛑 [Chatterbox Prime] Generación cancelada por el usuario.")
+                    GENERATION_STATE["message"] = "Generación cancelada por el usuario."
+                    break
+
                 sec_num = int(sec["number"])
                 part_num = int(part["number"])
-                chunk = part["text"]
+                # Se utiliza el texto normalizado fonéticamente para la síntesis
+                chunk = part.get("normalized_text") or part.get("text", "")
                 label = get_section_label(processing_mode)
                 filename = segment_path.name
 
@@ -709,16 +897,16 @@ def generate_tts_audio(
                     except Exception:
                         pass
 
-                # Comprobar si ya existe
+                # Conservar existentes y continuar producción incompleta
                 if segment_path.exists() and segment_path.stat().st_size > 44:
-                    print(f"⏩ [YA EXISTE] {filename}")
+                    print(f"⏩ [CONSERVANDO EXISTENTE] {filename}")
                     total_skipped += 1
                     last_generated_path = str(segment_path.resolve())
                     GENERATION_STATE["last_generated"] = filename
                     continue
 
                 set_seed(fixed_seed)
-                print(f"🎙️ Generando {label} {sec_num} Parte {part_num} ({len(chunk)} caracteres)...")
+                print(f"🎙️ [Sintetizando] {label} {sec_num} Parte {part_num} ({len(chunk)} chars)...")
 
                 try:
                     wav = current_model.generate(
@@ -740,8 +928,14 @@ def generate_tts_audio(
                     err_msg = f"Error en {label} {sec_num} Parte {part_num}: {part_err}"
                     print(f"❌ {err_msg}")
                     GENERATION_STATE["errors"].append(err_msg)
+                    # Si una parte falla, las demás deben poder continuar
+                    continue
 
-            GENERATION_STATE["message"] = f"Completado. {total_generated} generados, {total_skipped} omitidos."
+            if CUDA_AVAILABLE:
+                torch.cuda.empty_cache()
+
+            if not CANCEL_REQUESTED:
+                GENERATION_STATE["message"] = f"Producción finalizada. {total_generated} generados, {total_skipped} reutilizados."
             return last_generated_path
         finally:
             GENERATION_STATE["is_generating"] = False
@@ -759,7 +953,9 @@ def regenerate_tts_part(
     cfgw_input: float = DEFAULT_CFG_WEIGHT,
     progress: Optional[Any] = None
 ) -> str:
-    global GENERATION_STATE
+    """Regenera una parte individual sin alterar las demás."""
+    global GENERATION_STATE, CANCEL_REQUESTED
+    CANCEL_REQUESTED = False
 
     with GENERATION_LOCK:
         GENERATION_STATE["is_generating"] = True
@@ -781,7 +977,7 @@ def regenerate_tts_part(
                 if int(section.get("number", 0)) == sec_num:
                     for part in section.get("parts", []):
                         if int(part.get("number", 0)) == p_num:
-                            selected_text = part.get("text")
+                            selected_text = part.get("normalized_text") or part.get("text")
                             break
                     break
 
@@ -813,6 +1009,9 @@ def regenerate_tts_part(
                 current_model.sr
             )
 
+            if CUDA_AVAILABLE:
+                torch.cuda.empty_cache()
+
             print(f"🔄 [REGENERADO] {segment_path.name}")
             GENERATION_STATE["last_generated"] = segment_path.name
             GENERATION_STATE["message"] = f"{segment_path.name} regenerado correctamente."
@@ -832,7 +1031,9 @@ def batch_regenerate_tts_parts(
     cfgw_input: float,
     progress: Optional[Any] = None
 ) -> str:
-    global GENERATION_STATE
+    """Regenera en lote las partes seleccionadas por el usuario."""
+    global GENERATION_STATE, CANCEL_REQUESTED
+    CANCEL_REQUESTED = False
 
     if not selected_items:
         raise ValueError("No seleccionaste ninguna parte.")
@@ -863,8 +1064,13 @@ def batch_regenerate_tts_parts(
             errors: List[str] = []
 
             for idx, (sec_num, part_num) in enumerate(selected_items):
+                if CANCEL_REQUESTED:
+                    print("🛑 [Regeneración Lote] Cancelación solicitada.")
+                    break
+
+                label = get_section_label(processing_mode)
                 GENERATION_STATE["current_step"] = idx + 1
-                GENERATION_STATE["current_label"] = f"Sección {sec_num} Parte {part_num}"
+                GENERATION_STATE["current_label"] = f"{label} {sec_num} Parte {part_num}"
                 desc = f"Regenerando seleccionadas: {idx+1}/{total_selected}..."
                 GENERATION_STATE["message"] = desc
 
@@ -880,7 +1086,7 @@ def batch_regenerate_tts_parts(
                         if int(section.get("number", 0)) == sec_num:
                             for part in section.get("parts", []):
                                 if int(part.get("number", 0)) == part_num:
-                                    selected_text = part.get("text")
+                                    selected_text = part.get("normalized_text") or part.get("text")
                                     break
                             break
 
@@ -911,6 +1117,9 @@ def batch_regenerate_tts_parts(
                     print(f"❌ [ERROR REGENERANDO] {err_msg}")
                     continue
 
+            if CUDA_AVAILABLE:
+                torch.cuda.empty_cache()
+
             msg = f"Regeneración terminada: {generated} parte(s) procesada(s)."
             if errors:
                 msg += f" Hubo {len(errors)} error(es)."
@@ -920,7 +1129,17 @@ def batch_regenerate_tts_parts(
             GENERATION_STATE["is_generating"] = False
 
 
+# =============================================================================
+# 10. UNIÓN DE AUDIO (SECCIONES Y MASTER COMPLETO)
+# =============================================================================
+
 def join_section_audio(processing_mode: str, section_number: int) -> str:
+    """
+    🔗 Unir párrafo / 🔗 Unir escena:
+    Concatena los WAVs existentes de la sección sin volver a sintetizarlos
+    y conservando todas las partes originales intactas.
+    Guarda como: Parrafo_001.wav o Escena_001.wav
+    """
     project = load_project()
     if not project:
         raise ValueError("No hay ningún proyecto guardado.")
@@ -933,26 +1152,29 @@ def join_section_audio(processing_mode: str, section_number: int) -> str:
             selected_section = section
             break
 
+    label = get_section_label(processing_mode)
     if selected_section is None:
-        raise ValueError(f"No se encontró {get_section_label(processing_mode)} {sec_num}.")
+        raise ValueError(f"No se encontró {label} {sec_num}.")
 
     parts = selected_section.get("parts", [])
     if not parts:
-        raise ValueError("La sección no contiene partes.")
+        raise ValueError(f"{label} {sec_num} no contiene partes.")
 
-    missing_parts = []
     audio_paths = []
+    missing_parts = []
     for part in parts:
         p_num = int(part.get("number", 0))
         part_path = get_section_path(processing_mode, sec_num, p_num)
         if not part_path.exists() or part_path.stat().st_size <= 44:
-            missing_parts.append(str(p_num))
+            missing_parts.append(f"Parte {p_num}")
         else:
             audio_paths.append(part_path)
 
     if missing_parts:
-        parts_str = ", ".join(missing_parts)
-        raise ValueError(f"Faltan las partes: {parts_str}. Debes generarlas antes de unir.")
+        raise ValueError(
+            f"Faltan audios en {label} {sec_num}: {', '.join(missing_parts)}. "
+            "Genera las partes faltantes antes de unir."
+        )
 
     audio_parts: List[torch.Tensor] = []
     target_sr: Optional[int] = None
@@ -971,19 +1193,21 @@ def join_section_audio(processing_mode: str, section_number: int) -> str:
     joined_audio = torch.cat(audio_parts, dim=1)
     final_path = get_final_joined_path(processing_mode, sec_num)
     torchaudio.save(str(final_path.resolve()), joined_audio, target_sr)
-    print(f"🔗 [AUDIO UNIDO CON ÉXITO] {final_path.name}")
+    print(f"🔗 [AUDIO SECCIÓN UNIDO] {final_path.name}")
     return str(final_path.resolve())
 
 
 def join_all_audio(processing_mode: str = "scene") -> str:
-    """Concatena todos los segmentos generados del proyecto en un solo archivo WAV maestro."""
+    """
+    Concatena todos los segmentos del proyecto en un solo archivo WAV maestro.
+    """
     project = load_project()
     if not project:
         raise ValueError("No hay ningún proyecto guardado.")
 
     sections = project.get("sections", [])
     if not sections:
-        raise ValueError("El proyecto no contiene escenas ni secciones.")
+        raise ValueError("El proyecto no contiene escenas ni párrafos.")
 
     audio_paths = []
     missing_parts = []
@@ -995,7 +1219,7 @@ def join_all_audio(processing_mode: str = "scene") -> str:
             p_num = int(part.get("number", 0))
             part_path = get_section_path(processing_mode, s_num, p_num)
             if not part_path.exists() or part_path.stat().st_size <= 44:
-                missing_parts.append(f"Escena {s_num} Parte {p_num}")
+                missing_parts.append(f"{get_section_label(processing_mode)} {s_num} Parte {p_num}")
             else:
                 audio_paths.append(part_path)
 
@@ -1019,283 +1243,108 @@ def join_all_audio(processing_mode: str = "scene") -> str:
     joined_audio = torch.cat(audio_parts, dim=1)
     final_dir = OUTPUTS_DIR / "final"
     final_dir.mkdir(parents=True, exist_ok=True)
-    final_path = final_dir / "master_cronicas_mundiales.wav"
+    final_path = final_dir / "Master_Chatterbox_Prime.wav"
     torchaudio.save(str(final_path.resolve()), joined_audio, target_sr)
-    print(f"🔗 [AUDIO MASTER COMPLETO CREADO CON ÉXITO] {final_path.name}")
+    print(f"🏆 [MASTER COMPLETO GENERADO] {final_path.name}")
     return str(final_path.resolve())
 
 
 # =============================================================================
-# 10. ESTADO Y VISTAS DE PROYECTO
+# 11. RESUMEN Y VISTAS DE PRODUCCIÓN
 # =============================================================================
 
-def get_project_status(processing_mode: str) -> str:
-    project = load_project()
-    if not project:
-        return "🟡 **Sin proyecto generado todavía.**"
-
-    sections = project.get("sections", [])
-    if not sections:
-        return "🟡 **Proyecto vacío.**"
-
-    label = get_section_label(processing_mode)
-    total_parts = 0
-    generated_parts = 0
-    missing_parts = 0
-
-    for section in sections:
-        for part in section.get("parts", []):
-            total_parts += 1
-            p_num = int(part["number"])
-            s_num = int(section["number"])
-            p_path = get_section_path(processing_mode, s_num, p_num)
-            if p_path.exists() and p_path.stat().st_size > 44:
-                generated_parts += 1
-            else:
-                missing_parts += 1
-
-    status_icon = "🟢" if missing_parts == 0 else "🟡"
-    return (
-        f"{status_icon} **{label}s:** {len(sections)}  |  "
-        f"🎧 **Partes generadas:** {generated_parts} / {total_parts}  |  "
-        f"⏳ **Partes faltantes:** {missing_parts}"
-    )
-
-
-def get_panel_data(processing_mode: str) -> List[Dict[str, Any]]:
+def get_panel_data(mode: str = "scene") -> List[Dict[str, Any]]:
+    """Obtiene los datos estructurados para el panel de producción del frontend."""
     project = load_project()
     if not project:
         return []
 
-    result = []
-    for section in project.get("sections", []):
-        sec_num = int(section.get("number", 0))
-        title = section.get("title", "")
+    sections = project.get("sections", [])
+    data = []
+    for sec in sections:
+        s_num = int(sec.get("number", 0))
+        sec_title = sec.get("title") or f"{get_section_label(mode)} {s_num}"
+        joined_path = get_final_joined_path(mode, s_num)
+        has_joined = joined_path.exists() and joined_path.stat().st_size > 44
+
         parts_data = []
-
-        for part in section.get("parts", []):
-            part_num = int(part.get("number", 0))
-            part_path = get_section_path(processing_mode, sec_num, part_num)
-            exists = part_path.exists() and part_path.stat().st_size > 44
-            filename = part_path.name
-
+        for p in sec.get("parts", []):
+            p_num = int(p.get("number", 0))
+            p_path = get_section_path(mode, s_num, p_num)
+            has_audio = p_path.exists() and p_path.stat().st_size > 44
+            filename = p_path.name
             parts_data.append({
-                "number": part_num,
-                "text": part.get("text", ""),
+                "number": p_num,
+                "text": p.get("text", ""),
+                "normalized_text": p.get("normalized_text", ""),
+                "path": str(p_path.resolve()) if has_audio else None,
                 "filename": filename,
-                "path": str(part_path.resolve()) if exists else None,
-                "audio_url": f"/api/audio/{filename}" if exists else None,
-                "exists": exists
+                "audio_url": f"/outputs/segments/{filename}" if has_audio else None,
+                "has_audio": has_audio,
+                "status": "Listo" if has_audio else "Pendiente"
             })
 
-        final_path = get_final_joined_path(processing_mode, sec_num)
-        final_exists = final_path.exists() and final_path.stat().st_size > 44
-        final_filename = final_path.name
-
-        result.append({
-            "number": sec_num,
-            "title": title,
-            "parts": parts_data,
-            "final_path": str(final_path.resolve()) if final_exists else None,
-            "final_filename": final_filename if final_exists else None,
-            "final_audio_url": f"/api/audio/{final_filename}" if final_exists else None,
-            "exists": final_exists
+        data.append({
+            "number": s_num,
+            "title": sec_title,
+            "text": sec.get("text", ""),
+            "has_joined": has_joined,
+            "joined_filename": joined_path.name if has_joined else None,
+            "joined_audio_url": f"/outputs/segments/{joined_path.name}" if has_joined else None,
+            "parts": parts_data
         })
-
-    return result
-
-
-def get_selection_choices(processing_mode: str) -> List[Tuple[str, str]]:
-    data = get_panel_data(processing_mode)
-    choices: List[Tuple[str, str]] = []
-
-    for section in data:
-        sec_num = section["number"]
-        title = section.get("title", "")
-
-        for part in section["parts"]:
-            part_num = part["number"]
-            value = f"{processing_mode}|{sec_num}|{part_num}"
-
-            if processing_mode == "scene":
-                display = f"Escena {sec_num}"
-                if title:
-                    display += f" — {title}"
-                display += f" · Parte {part_num:02d}"
-            else:
-                display = f"Párrafo {sec_num:03d} · Parte {part_num:02d}"
-
-            if not part["exists"]:
-                display += "  ⏳ (Pendiente)"
-            else:
-                display += "  ✅"
-
-            choices.append((display, value))
-
-    return choices
+    return data
 
 
-def parse_selected_items(selected_items: Any) -> List[Tuple[int, int]]:
-    parsed = []
-    if not selected_items:
-        return parsed
+def get_project_summary(mode: str = "scene") -> Dict[str, Any]:
+    """Genera las métricas consolidadas de producción."""
+    panel = get_panel_data(mode)
+    total_sections = len(panel)
+    total_parts = sum(len(s.get("parts", [])) for s in panel)
+    ready_parts = sum(sum(1 for p in s.get("parts", []) if p.get("has_audio")) for s in panel)
+    pending_parts = total_parts - ready_parts
+    percent = round((ready_parts / max(1, total_parts)) * 100) if total_parts > 0 else 0
+    errors_count = len(GENERATION_STATE.get("errors", []))
 
-    for item in selected_items:
-        if isinstance(item, (list, tuple)) and len(item) == 2:
-            try:
-                parsed.append((int(item[0]), int(item[1])))
-                continue
-            except (ValueError, TypeError):
-                pass
-
-        if isinstance(item, str):
-            parts = item.split("|")
-            if len(parts) == 3:
-                try:
-                    parsed.append((int(parts[1]), int(parts[2])))
-                    continue
-                except ValueError:
-                    pass
-            elif len(parts) == 2:
-                try:
-                    parsed.append((int(parts[0]), int(parts[1])))
-                    continue
-                except ValueError:
-                    pass
-    return parsed
+    return {
+        "mode": mode,
+        "mode_label": "Escenas" if mode == "scene" else "Párrafos",
+        "total_sections": total_sections,
+        "total_parts": total_parts,
+        "ready_parts": ready_parts,
+        "pending_parts": pending_parts,
+        "errors_count": errors_count,
+        "percent": percent,
+        "is_generating": GENERATION_STATE["is_generating"],
+        "current_label": GENERATION_STATE["current_label"],
+        "message": GENERATION_STATE["message"]
+    }
 
 
-# =============================================================================
-# 11. GRADIO BLOCKS (FALLBACK Y HERRAMIENTA DE PRUEBA)
-# =============================================================================
-
-CUSTOM_CSS = """
-body, .gradio-container { background-color: #090c10 !important; color: #f0f4f8 !important; }
-.cm-header { background: #131922; border-bottom: 1px solid #222936; padding: 20px; border-radius: 12px; text-align: center; }
-.cm-title { font-size: 28px; font-weight: 800; color: #ffffff; }
-.cm-card { background-color: #11151c !important; border: 1px solid #222936 !important; border-radius: 10px !important; }
-"""
-
-def create_studio_app() -> Any:
-    """Crea la interfaz de Gradio como herramienta de prueba y fallback."""
-    try:
-        import gradio as gr
-    except ImportError:
-        print("⚠️ Gradio no disponible en este entorno.")
-        return None
-
-    saved_project = load_project()
-    initial_mode = saved_project.get("processing_mode", "scene") if saved_project else "scene"
-    initial_text = saved_project.get("last_script") if saved_project and saved_project.get("last_script") else (
-        "ESCENA 1 — El Gran Despertar\n"
-        "En el corazón de la antigua Europa, el año 1492 marcó el inicio de una era que transformaría el destino de 500 naciones.\n\n"
-        "ESCENA 2 — La Tempestad en Altamar\n"
-        "Durante 40 días y 40 noches, los vientos del Atlántico pusieron a prueba el temple de más de 90 tripulantes."
+def get_project_status(mode: str = "scene") -> str:
+    summ = get_project_summary(mode)
+    return (
+        f"📊 **{summ['mode_label']}**: {summ['total_sections']} | "
+        f"**Partes**: {summ['ready_parts']}/{summ['total_parts']} ({summ['percent']}%) | "
+        f"**Pendientes**: {summ['pending_parts']} | **Errores**: {summ['errors_count']}"
     )
-    initial_settings = saved_project.get("settings", {}) if saved_project else {}
-    initial_lang = initial_settings.get("language", "es")
-    initial_exaggeration = initial_settings.get("exaggeration", DEFAULT_EXAGGERATION)
-    initial_temp = initial_settings.get("temperature", DEFAULT_TEMPERATURE)
-    initial_seed = initial_settings.get("seed", DEFAULT_SEED)
-    initial_cfg = initial_settings.get("cfg_weight", DEFAULT_CFG_WEIGHT)
-
-    voice_choices = get_voice_choices()
-    initial_voice_name = PREFERRED_VOICE if PREFERRED_VOICE in voice_choices else next(iter(voice_choices), None)
-    initial_voice_path = voice_choices.get(initial_voice_name) if initial_voice_name else default_audio_for_ui(initial_lang)
-
-    with gr.Blocks(title="Crónicas Mundiales — Gradio Fallback", css=CUSTOM_CSS) as demo:
-        panel_refresh = gr.State(0)
-
-        gr.HTML(
-            f"""
-            <div class="cm-header">
-                <div class="cm-title">CRÓNICAS MUNDIALES — GRADIO FALLBACK</div>
-                <div style="color: #06b6d4; font-size: 13px; margin-top: 4px;">Modo de prueba local &bull; {DEVICE_LABEL}</div>
-            </div>
-            """
-        )
-
-        with gr.Row():
-            with gr.Column(scale=5):
-                processing_mode = gr.Radio(
-                    choices=[("🎬 Por escenas", "scene"), ("📄 Por párrafos", "paragraph")],
-                    value=initial_mode, label="Modo de procesamiento"
-                )
-                text_input = gr.Textbox(value=initial_text, label="Guion", lines=12)
-                language_id = gr.Dropdown(choices=get_language_dropdown_choices(), value=initial_lang, label="Idioma")
-                voice_dropdown = gr.Dropdown(choices=list(voice_choices.keys()), value=initial_voice_name, label="Voz")
-                ref_wav = gr.Audio(sources=["upload", "microphone"], type="filepath", label="Referencia", value=initial_voice_path)
-
-                with gr.Accordion("⚙️ Parámetros", open=False):
-                    exaggeration = gr.Slider(0.25, 2.0, step=0.05, label="Exaggeration", value=initial_exaggeration)
-                    cfg_weight = gr.Slider(0.2, 1.0, step=0.05, label="CFG Weight", value=initial_cfg)
-                    temp = gr.Slider(0.05, 5.0, step=0.05, label="Temperature", value=initial_temp)
-                    seed_num = gr.Number(value=initial_seed, precision=0, label="Seed")
-
-            with gr.Column(scale=6):
-                run_btn = gr.Button("🎙️ GENERAR NARRACIÓN", variant="primary")
-                latest_audio = gr.Audio(label="Último audio", type="filepath")
-                status_markdown = gr.Markdown(get_project_status(initial_mode))
-
-                selected_parts = gr.CheckboxGroup(choices=get_selection_choices(initial_mode), value=[], label="Partes")
-                with gr.Row():
-                    select_all_btn = gr.Button("☑️ Todas")
-                    clear_selection_btn = gr.Button("⬜ Limpiar")
-                    batch_regen_btn = gr.Button("🔄 Regenerar seleccionadas")
-
-                @gr.render(inputs=[processing_mode, panel_refresh])
-                def render_panel(mode: str, _rf: int):
-                    data = get_panel_data(mode)
-                    if not data:
-                        gr.Markdown("🟡 Sin audios.")
-                        return
-                    for sec in data:
-                        gr.Markdown(f"### Sección {sec['number']}")
-                        for part in sec["parts"]:
-                            with gr.Row():
-                                gr.Markdown(f"Parte {part['number']}: {part['text']}")
-                                gr.Audio(value=part["path"], type="filepath", interactive=False)
-
-        # Callbacks
-        run_btn.click(
-            fn=lambda t, m, l, r, ex, tp, sd, cf, rf: (
-                generate_tts_audio(t, m, l, r, ex, tp, sd, cf),
-                get_project_status(m),
-                gr.update(choices=get_selection_choices(m), value=[]),
-                int(rf) + 1
-            ),
-            inputs=[text_input, processing_mode, language_id, ref_wav, exaggeration, temp, seed_num, cfg_weight, panel_refresh],
-            outputs=[latest_audio, status_markdown, selected_parts, panel_refresh]
-        )
-
-        select_all_btn.click(
-            fn=lambda m: [val for _, val in get_selection_choices(m)],
-            inputs=[processing_mode],
-            outputs=[selected_parts]
-        )
-
-        clear_selection_btn.click(fn=lambda: [], inputs=[], outputs=[selected_parts])
-
-    return demo
 
 
 # =============================================================================
-# 12. API REST LOCAL Y SERVIDOR DE FRONTEND ESTÁTICO (FASTAPI)
+# 12. API REST LOCAL Y SERVIDOR (FASTAPI)
 # =============================================================================
 
 DIST_DIR = BASE_DIR / "dist"
 
 def build_fastapi_app() -> Any:
-    """Construye la aplicación FastAPI con endpoints REST, frontend compilado y Gradio."""
-    from fastapi import FastAPI, HTTPException, BackgroundTasks, Request
+    """Construye la aplicación FastAPI profesional para Chatterbox Prime."""
+    from fastapi import FastAPI, HTTPException, BackgroundTasks, Request, UploadFile, File, Form
     from fastapi.middleware.cors import CORSMiddleware
     from fastapi.responses import FileResponse, JSONResponse, HTMLResponse
-    from fastapi.staticfiles import StaticFiles
     from pydantic import BaseModel
 
-    api_app = FastAPI(title="Crónicas Mundiales — Narration Studio", version="2.0")
+    api_app = FastAPI(title="Chatterbox Prime — AI Narration Studio", version="3.0")
 
-    # Habilitar CORS para permitir peticiones desde cualquier origen local
     api_app.add_middleware(
         CORSMiddleware,
         allow_origins=["*"],
@@ -1336,39 +1385,129 @@ def build_fastapi_app() -> Any:
         cfg_weight: float = DEFAULT_CFG_WEIGHT
         seed: int = DEFAULT_SEED
 
+    class RegenerateFromHerePayload(BaseModel):
+        processing_mode: str = "scene"
+        section_number: int
+        part_number: int
+        language: str = "es"
+        audio_prompt_path: Optional[str] = None
+        exaggeration: float = DEFAULT_EXAGGERATION
+        temperature: float = DEFAULT_TEMPERATURE
+        cfg_weight: float = DEFAULT_CFG_WEIGHT
+        seed: int = DEFAULT_SEED
+
     class JoinPayload(BaseModel):
         processing_mode: str = "scene"
         section_number: int
 
     # -------------------------------------------------------------------------
-    # ENDPOINTS DE LA API REST (/api/...)
+    # ENDPOINTS DE ESTADO Y HARDWARE
     # -------------------------------------------------------------------------
 
     @api_app.get("/api/status")
     def api_status():
+        info = inspect_chatterbox_installation()
         return {
             "status": "online",
             "device": DEVICE,
             "device_label": DEVICE_LABEL,
+            "cuda_available": CUDA_AVAILABLE,
             "model_loaded": MODEL is not None,
             "model_status": get_model_status_text(),
-            "t3_model": T3_MODEL,
+            "chatterbox_version": info.get("version"),
+            "v3_compatible": info.get("v3_compatible"),
+            "active_model": info.get("active_model_version"),
             "is_generating": GENERATION_STATE["is_generating"],
-            "frontend_served": DIST_DIR.exists() and (DIST_DIR / "index.html").exists()
+            "frontend_served": (BASE_DIR / "templates" / "index.html").exists() or (DIST_DIR / "index.html").exists()
         }
 
     @api_app.get("/api/progress")
     def api_progress():
         return GENERATION_STATE
 
+    @api_app.post("/api/cancel")
+    def api_cancel():
+        global CANCEL_REQUESTED, GENERATION_STATE
+        if GENERATION_STATE["is_generating"]:
+            CANCEL_REQUESTED = True
+            GENERATION_STATE["message"] = "Cancelando proceso..."
+            return {"status": "cancelling", "message": "Petición de cancelación enviada."}
+        return {"status": "idle", "message": "No hay procesos activos."}
+
+    # -------------------------------------------------------------------------
+    # ADMINISTRAR VOCES (SUBIR, ELIMINAR, REPRODUCIR, REFRESCAR)
+    # -------------------------------------------------------------------------
+
     @api_app.get("/api/voices")
     def api_voices():
-        choices = get_voice_choices()
-        voice_list = [{"name": name, "path": path} for name, path in choices.items()]
-        return {
-            "voices": voice_list,
-            "default_voice": PREFERRED_VOICE if PREFERRED_VOICE in choices else (voice_list[0]["name"] if voice_list else None)
-        }
+        VOICES_DIR.mkdir(parents=True, exist_ok=True)
+        files = get_voice_files()
+        voice_list = []
+        for f in files:
+            size_kb = round(f.stat().st_size / 1024, 1)
+            voice_list.append({
+                "name": f.stem,
+                "filename": f.name,
+                "path": str(f.resolve()),
+                "url": f"/api/voices/{f.name}/preview",
+                "size_kb": size_kb,
+                "is_default": f.stem == PREFERRED_VOICE
+            })
+
+        if not any(v["name"] == PREFERRED_VOICE for v in voice_list):
+            voice_list.insert(0, {
+                "name": PREFERRED_VOICE,
+                "filename": f"{PREFERRED_VOICE}.wav",
+                "path": str((VOICES_DIR / f"{PREFERRED_VOICE}.wav").resolve()),
+                "url": f"/api/voices/{PREFERRED_VOICE}.wav/preview",
+                "size_kb": 0,
+                "is_default": True
+            })
+
+        default_v = PREFERRED_VOICE if any(v["name"] == PREFERRED_VOICE for v in voice_list) else (voice_list[0]["name"] if voice_list else None)
+        return {"voices": voice_list, "default_voice": default_v}
+
+    @api_app.post("/api/voices/upload")
+    async def api_upload_voice(file: UploadFile = File(...), name: Optional[str] = Form(None)):
+        VOICES_DIR.mkdir(parents=True, exist_ok=True)
+        raw_name = (name or Path(file.filename or "Nueva_Voz").stem).strip()
+        safe_name = re.sub(r'[\\/*?:"<>|]', '', raw_name).strip() or "Nueva_Voz"
+        dest_path = VOICES_DIR / f"{safe_name}.wav"
+
+        content = await file.read()
+        with open(dest_path, "wb") as f_out:
+            f_out.write(content)
+
+        print(f"🎙️ [Voces] Archivo guardado automáticamente en: {dest_path.name}")
+        return api_voices()
+
+    @api_app.delete("/api/voices/{voice_name}")
+    def api_delete_voice(voice_name: str):
+        clean_name = re.sub(r'[\\/*?:"<>|]', '', voice_name).strip()
+        target = VOICES_DIR / f"{clean_name}.wav"
+        if target.exists():
+            try:
+                target.unlink()
+                print(f"🗑️ [Voces] Voz eliminada: {target.name}")
+            except Exception as e:
+                raise HTTPException(status_code=500, detail=f"No se pudo eliminar: {e}")
+        else:
+            alt_target = VOICES_DIR / clean_name
+            if alt_target.exists():
+                alt_target.unlink()
+        return api_voices()
+
+    @api_app.get("/api/voices/{filename}/preview")
+    def api_voice_preview(filename: str):
+        safe_name = Path(filename).name
+        p = VOICES_DIR / safe_name
+        if not p.exists():
+            p_wav = VOICES_DIR / f"{safe_name}.wav"
+            if p_wav.exists():
+                p = p_wav
+            else:
+                raise HTTPException(status_code=404, detail="Archivo de voz no encontrado")
+        return FileResponse(str(p.resolve()), media_type="audio/wav", filename=p.name)
 
     @api_app.get("/api/languages")
     def api_languages():
@@ -1380,16 +1519,23 @@ def build_fastapi_app() -> Any:
             "default_language": "es"
         }
 
+    # -------------------------------------------------------------------------
+    # PROYECTO Y PRODUCCIÓN
+    # -------------------------------------------------------------------------
+
     @api_app.get("/api/project")
     def api_get_project(mode: str = "scene"):
         proj = load_project()
-        panel = get_panel_data(mode)
-        status_text = get_project_status(mode)
+        actual_mode = mode or (proj.get("processing_mode") if proj else "scene")
+        panel = get_panel_data(actual_mode)
+        summary = get_project_summary(actual_mode)
+        status_text = get_project_status(actual_mode)
         return {
             "project": proj,
             "panel": panel,
+            "summary": summary,
             "status_text": status_text,
-            "processing_mode": mode
+            "processing_mode": actual_mode
         }
 
     @api_app.post("/api/project")
@@ -1403,7 +1549,8 @@ def build_fastapi_app() -> Any:
                 exaggeration_input=payload.exaggeration,
                 temperature_input=payload.temperature,
                 seed_num_input=payload.seed,
-                cfgw_input=payload.cfg_weight
+                cfgw_input=payload.cfg_weight,
+                voice_name_input=payload.voice_name
             )
             return {"status": "ok", "project": proj}
         except Exception as e:
@@ -1419,17 +1566,18 @@ def build_fastapi_app() -> Any:
                 exaggeration_input=payload.exaggeration,
                 temperature_input=payload.temperature,
                 seed_num_input=payload.seed,
-                cfgw_input=payload.cfg_weight
+                cfgw_input=payload.cfg_weight,
+                voice_name_input=payload.voice_name
             )
         except Exception as e:
-            print(f"❌ Error en generación en background: {e}")
+            print(f"❌ Error en generación background: {e}")
 
     @api_app.post("/api/generate")
     def api_generate(payload: ProjectPayload, bg_tasks: BackgroundTasks):
         if GENERATION_STATE["is_generating"]:
             raise HTTPException(status_code=409, detail="Ya existe una tarea de generación en curso.")
         bg_tasks.add_task(run_bg_generation, payload)
-        return {"status": "started", "message": "Generación iniciada en segundo plano"}
+        return {"status": "started", "message": "Producción iniciada en segundo plano"}
 
     @api_app.post("/api/regenerate")
     def api_regenerate(payload: RegeneratePayload):
@@ -1449,14 +1597,14 @@ def build_fastapi_app() -> Any:
             return {
                 "status": "ok",
                 "filename": filename,
-                "audio_url": f"/api/audio/{filename}"
+                "audio_url": f"/outputs/segments/{filename}"
             }
         except Exception as e:
             raise HTTPException(status_code=400, detail=str(e))
 
     def run_bg_batch_regenerate(payload: BatchRegeneratePayload):
         try:
-            items = [(item[0], item[1]) for item in payload.selected_items]
+            items = [(int(item[0]), int(item[1])) for item in payload.selected_items]
             batch_regenerate_tts_parts(
                 selected_items=items,
                 processing_mode=payload.processing_mode,
@@ -1468,24 +1616,69 @@ def build_fastapi_app() -> Any:
                 cfgw_input=payload.cfg_weight
             )
         except Exception as e:
-            print(f"❌ Error en batch regenerate background: {e}")
+            print(f"❌ Error en regeneración por lotes: {e}")
 
     @api_app.post("/api/regenerate-batch")
     def api_regenerate_batch(payload: BatchRegeneratePayload, bg_tasks: BackgroundTasks):
         if GENERATION_STATE["is_generating"]:
             raise HTTPException(status_code=409, detail="Ya existe una tarea en curso.")
         bg_tasks.add_task(run_bg_batch_regenerate, payload)
-        return {"status": "started", "message": "Regeneración por lote iniciada"}
+        return {"status": "started", "message": f"Regenerando {len(payload.selected_items)} partes"}
+
+    @api_app.post("/api/regenerate-from-here")
+    def api_regenerate_from_here(payload: RegenerateFromHerePayload, bg_tasks: BackgroundTasks):
+        if GENERATION_STATE["is_generating"]:
+            raise HTTPException(status_code=409, detail="Ya existe una tarea en curso.")
+
+        project = load_project()
+        if not project:
+            raise HTTPException(status_code=400, detail="No hay proyecto guardado.")
+
+        items_to_regen: List[List[int]] = []
+        started = False
+        target_sec = int(payload.section_number)
+        target_part = int(payload.part_number)
+
+        for sec in project.get("sections", []):
+            s_num = int(sec.get("number", 0))
+            for p in sec.get("parts", []):
+                p_num = int(p.get("number", 0))
+                if not started:
+                    if s_num == target_sec and p_num == target_part:
+                        started = True
+                if started:
+                    items_to_regen.append([s_num, p_num])
+
+        if not items_to_regen:
+            raise HTTPException(status_code=400, detail="No se encontraron partes desde el punto indicado.")
+
+        batch_payload = BatchRegeneratePayload(
+            selected_items=items_to_regen,
+            processing_mode=payload.processing_mode,
+            language=payload.language,
+            audio_prompt_path=payload.audio_prompt_path,
+            exaggeration=payload.exaggeration,
+            temperature=payload.temperature,
+            cfg_weight=payload.cfg_weight,
+            seed=payload.seed
+        )
+        bg_tasks.add_task(run_bg_batch_regenerate, batch_payload)
+        return {"status": "started", "message": f"Regenerando {len(items_to_regen)} partes desde {target_sec}-{target_part}"}
+
+    # -------------------------------------------------------------------------
+    # UNIÓN DE AUDIO
+    # -------------------------------------------------------------------------
 
     @api_app.post("/api/join")
-    def api_join(payload: JoinPayload):
+    @api_app.post("/api/join-section")
+    def api_join_section(payload: JoinPayload):
         try:
             path = join_section_audio(payload.processing_mode, payload.section_number)
             filename = Path(path).name
             return {
                 "status": "ok",
                 "filename": filename,
-                "audio_url": f"/api/audio/{filename}"
+                "audio_url": f"/outputs/segments/{filename}"
             }
         except Exception as e:
             raise HTTPException(status_code=400, detail=str(e))
@@ -1517,25 +1710,9 @@ def build_fastapi_app() -> Any:
         raise HTTPException(status_code=404, detail="Archivo de audio no encontrado")
 
     # -------------------------------------------------------------------------
-    # ARCHIVOS ESTÁTICOS DE AUDIO Y ASSETS DEL FRONTEND (SIN DEPENDER DE AIOFILES)
+    # SERVIR ARCHIVOS ESTÁTICOS Y FRONTEND
     # -------------------------------------------------------------------------
 
-    # 1. Servir los assets compilados de Vite si existen (/assets/...)
-    @api_app.get("/assets/{asset_path:path}")
-    def serve_asset(asset_path: str):
-        safe_path = DIST_DIR / "assets" / asset_path
-        if safe_path.exists() and safe_path.is_file():
-            media_type = None
-            if safe_path.suffix == ".js":
-                media_type = "text/javascript"
-            elif safe_path.suffix == ".css":
-                media_type = "text/css"
-            elif safe_path.suffix in [".woff", ".woff2"]:
-                media_type = "font/woff2"
-            return FileResponse(str(safe_path.resolve()), media_type=media_type)
-        raise HTTPException(status_code=404, detail="Asset no encontrado")
-
-    # 2. Servir archivos WAV generados en /outputs/segments/
     @api_app.get("/outputs/segments/{filename}")
     def serve_segment(filename: str):
         safe_name = Path(filename).name
@@ -1544,7 +1721,19 @@ def build_fastapi_app() -> Any:
             raise HTTPException(status_code=404, detail="Segmento no encontrado")
         return FileResponse(path=str(audio_path), media_type="audio/wav", filename=safe_name)
 
-    # 3. Montar Gradio en /gradio si está instalado (como fallback de prueba)
+    @api_app.get("/assets/{asset_path:path}")
+    def serve_asset(asset_path: str):
+        safe_path = DIST_DIR / "assets" / asset_path
+        if safe_path.exists() and safe_path.is_file():
+            media_type = "application/octet-stream"
+            if safe_path.suffix == ".js":
+                media_type = "application/javascript"
+            elif safe_path.suffix == ".css":
+                media_type = "text/css"
+            return FileResponse(str(safe_path.resolve()), media_type=media_type)
+        raise HTTPException(status_code=404, detail="Asset no encontrado")
+
+    # Montar Gradio en /gradio si está instalado
     try:
         import gradio as gr
         demo = create_studio_app()
@@ -1554,23 +1743,19 @@ def build_fastapi_app() -> Any:
     except Exception as g_err:
         print(f"ℹ️ Gradio fallback no montado en FastAPI: {g_err}")
 
-    # 4. Servir la ruta raíz (/) - Interfaz nativa de Python / HTML / CSS / JS sin npm
+    # Servir la ruta raíz (/) - Prioridad a template nativo de Python / HTML
     @api_app.get("/", response_class=FileResponse)
     def serve_root():
-        # A. Si existe la plantilla nativa del estudio (sin requerir Node/npm)
         template_file = BASE_DIR / "templates" / "index.html"
         if template_file.exists():
             return FileResponse(str(template_file.resolve()))
 
-        # B. Si existe dist/index.html
         index_file = DIST_DIR / "index.html"
         if index_file.exists():
             return FileResponse(str(index_file.resolve()))
 
-        # C. Redirigir a Gradio como fallback
         return HTMLResponse("<meta http-equiv='refresh' content='0; url=/gradio'>")
 
-    # 5. Fallback para rutas SPA del frontend
     @api_app.get("/{full_path:path}")
     def serve_spa_fallback(full_path: str):
         if full_path.startswith("api/") or full_path.startswith("gradio") or full_path.startswith("outputs/"):
@@ -1594,11 +1779,92 @@ def build_fastapi_app() -> Any:
 
 
 # =============================================================================
-# 13. PUNTO DE ENTRADA Y SERVIDOR HTTP LOCAL
+# 13. INTERFAZ GRADIO (HERRAMIENTA SECUNDARIA / FALLBACK)
+# =============================================================================
+
+CUSTOM_CSS = """
+.cm-header { background: #0f141d; border-bottom: 1px solid #1f2737; padding: 20px; border-radius: 12px; text-align: center; }
+.cm-title { font-size: 26px; font-weight: 800; color: #ffffff; letter-spacing: -0.02em; }
+.cm-sub { color: #06b6d4; font-size: 13px; font-weight: 600; margin-top: 4px; text-transform: uppercase; }
+"""
+
+def create_studio_app() -> Any:
+    """Crea la interfaz de Gradio como herramienta secundaria y de prueba."""
+    try:
+        import gradio as gr
+    except ImportError:
+        print("⚠️ Gradio no disponible en este entorno.")
+        return None
+
+    saved_project = load_project()
+    initial_mode = saved_project.get("processing_mode", "scene") if saved_project else "scene"
+    initial_text = saved_project.get("last_script") if saved_project and saved_project.get("last_script") else (
+        "ESCENA 1 — El Gran Despertar\n"
+        "En el corazón de la antigua Europa, el año 1492 marcó el inicio de una era que transformaría el destino de 500 naciones.\n\n"
+        "ESCENA 2 — La Tempestad en Altamar\n"
+        "Durante 40 días y 40 noches, los vientos del Atlántico pusieron a prueba el temple de más de 90 tripulantes."
+    )
+    initial_settings = saved_project.get("settings", {}) if saved_project else {}
+    initial_lang = initial_settings.get("language", "es")
+    initial_exaggeration = initial_settings.get("exaggeration", DEFAULT_EXAGGERATION)
+    initial_temp = initial_settings.get("temperature", DEFAULT_TEMPERATURE)
+    initial_seed = initial_settings.get("seed", DEFAULT_SEED)
+    initial_cfg = initial_settings.get("cfg_weight", DEFAULT_CFG_WEIGHT)
+
+    voice_choices = get_voice_choices()
+    initial_voice_name = PREFERRED_VOICE if PREFERRED_VOICE in voice_choices else next(iter(voice_choices), None)
+    initial_voice_path = voice_choices.get(initial_voice_name) if initial_voice_name else default_audio_for_ui(initial_lang)
+
+    with gr.Blocks(title="Chatterbox Prime — Gradio Fallback", css=CUSTOM_CSS) as demo:
+        gr.HTML(
+            f"""
+            <div class="cm-header">
+                <div class="cm-title">CHATTERBOX PRIME</div>
+                <div class="cm-sub">AI Narration Studio &bull; {DEVICE.upper()}</div>
+            </div>
+            """
+        )
+
+        with gr.Row():
+            with gr.Column(scale=5):
+                processing_mode = gr.Radio(
+                    choices=[("🎬 Por escenas", "scene"), ("📄 Por párrafos", "paragraph")],
+                    value=initial_mode, label="Modo de trabajo"
+                )
+                text_input = gr.Textbox(value=initial_text, label="Guion", lines=12)
+                language_id = gr.Dropdown(choices=get_language_dropdown_choices(), value=initial_lang, label="Idioma")
+                voice_dropdown = gr.Dropdown(choices=list(voice_choices.keys()), value=initial_voice_name, label="Voz")
+                ref_wav = gr.Audio(sources=["upload", "microphone"], type="filepath", label="Referencia", value=initial_voice_path)
+
+                with gr.Accordion("⚙️ Parámetros de Audio", open=False):
+                    exaggeration = gr.Slider(0.0, 1.0, step=0.01, label="Exaggeration", value=initial_exaggeration)
+                    cfg_weight = gr.Slider(0.1, 1.0, step=0.05, label="CFG Weight", value=initial_cfg)
+                    temp = gr.Slider(0.1, 1.0, step=0.01, label="Temperature", value=initial_temp)
+                    seed_num = gr.Number(value=initial_seed, precision=0, label="Seed")
+
+            with gr.Column(scale=6):
+                run_btn = gr.Button("🎙️ GENERAR NARRACIÓN", variant="primary")
+                latest_audio = gr.Audio(label="Último audio generado", type="filepath")
+                status_markdown = gr.Markdown(get_project_status(initial_mode))
+
+        run_btn.click(
+            fn=lambda t, m, l, r, ex, tp, sd, cf, v: (
+                generate_tts_audio(t, m, l, r, ex, tp, sd, cf, v),
+                get_project_status(m)
+            ),
+            inputs=[text_input, processing_mode, language_id, ref_wav, exaggeration, temp, seed_num, cfg_weight, voice_dropdown],
+            outputs=[latest_audio, status_markdown]
+        )
+
+    return demo
+
+
+# =============================================================================
+# 14. PUNTO DE ENTRADA Y SERVIDOR HTTP LOCAL
 # =============================================================================
 
 def start_server(port: int = 8000, host: str = "127.0.0.1", gradio_only: bool = False, open_browser: bool = True):
-    """Inicia el servidor backend según dependencias disponibles."""
+    """Inicia el servidor unificado para Chatterbox Prime."""
     if gradio_only:
         print("🖥️ Iniciando en modo Gradio-Only...")
         demo = create_studio_app()
@@ -1606,82 +1872,45 @@ def start_server(port: int = 8000, host: str = "127.0.0.1", gradio_only: bool = 
             demo.queue().launch(server_name=host, server_port=port, share=False)
         return
 
-    # 1. Intentar iniciar con FastAPI y Uvicorn
+    print("🚀 [Chatterbox Prime] Verificando servidor web FastAPI...")
     try:
-        import fastapi
         import uvicorn
-        app = build_fastapi_app()
+        fastapi_app = build_fastapi_app()
 
-        target_url = f"http://localhost:{port}"
+        def _open():
+            time.sleep(1.8)
+            try:
+                import webbrowser
+                target_url = f"http://localhost:{port}"
+                print(f"🌐 [Navegador] Abriendo {target_url}...")
+                webbrowser.open(target_url)
+            except Exception as e:
+                print(f"ℹ️ [Navegador] No se pudo abrir automáticamente: {e}")
 
-        print("\n" + "=" * 65)
-        print("🎙️ CRÓNICAS MUNDIALES — NARRATION STUDIO INICIADO")
-        print(f"🌐 Frontend Moderno: {target_url}")
-        print(f"📡 API REST & Audio: {target_url}/api")
-        print(f"🎛️ Gradio Fallback:  {target_url}/gradio")
-        print(f"🚀 Dispositivo:      {DEVICE_LABEL}")
-        print("=" * 65 + "\n")
-
-        # Apertura automática del navegador tras breve pausa
         if open_browser:
-            def _launch_browser():
-                time.sleep(1.2)
-                try:
-                    import webbrowser
-                    webbrowser.open(target_url)
-                except Exception:
-                    pass
-            threading.Thread(target=_launch_browser, daemon=True).start()
+            threading.Thread(target=_open, daemon=True).start()
 
-        try:
-            uvicorn.run(app, host=host, port=port, log_level="info")
-        except OSError as port_err:
-            if "address already in use" in str(port_err).lower() or "10048" in str(port_err):
-                alt_port = port + 1
-                print(f"⚠️ El puerto {port} está ocupado. Probando en http://localhost:{alt_port}...")
-                uvicorn.run(app, host=host, port=alt_port, log_level="info")
-            else:
-                raise port_err
-        return
-    except ImportError as imp_err:
-        print(f"⚠️ FastAPI o Uvicorn no están disponibles ({imp_err}).")
-        print("ℹ️ Intentando iniciar Gradio standalone...")
-    except Exception as general_err:
-        print(f"⚠️ Error al iniciar FastAPI: {general_err}")
-        traceback.print_exc()
+        print(f"\n=====================================================================")
+        print(f"🌟 CHATTERBOX PRIME — AI NARRATION STUDIO")
+        print(f"🌐 Servidor disponible en: http://localhost:{port}")
+        print(f"🎛️ Vista alternativa Gradio en: http://localhost:{port}/gradio")
+        print(f"⚡ Dispositivo activo: {DEVICE.upper()} (CUDA: {CUDA_AVAILABLE})")
+        print(f"=====================================================================\n")
 
-    # 2. Si FastAPI no está instalado, intentar lanzar Gradio standalone
-    try:
-        import gradio as gr
-        print(f"🖥️ Lanzando Gradio standalone en http://localhost:{port}...")
+        uvicorn.run(fastapi_app, host=host, port=port, log_level="info")
+
+    except ImportError:
+        print("⚠️ FastAPI o Uvicorn no están instalados. Iniciando con Gradio...")
         demo = create_studio_app()
         if demo:
-            demo.queue().launch(server_name=host, server_port=port, share=False)
-            return
-    except ImportError:
-        pass
-    except Exception as g_err:
-        print(f"❌ Error al iniciar Gradio: {g_err}")
-        traceback.print_exc()
-
-    print("\n" + "=" * 65)
-    print("❌ No se encontró FastAPI ni Gradio instalados en este entorno de Python.")
-    print(f"👉 Intérprete actual: {sys.executable}")
-    print("👉 Por favor ejecuta:")
-    print(f"   \"{sys.executable}\" -m pip install -r requirements.txt")
-    print("=" * 65 + "\n")
-    try:
-        input("Presiona Enter para cerrar...")
-    except Exception:
-        pass
-    sys.exit(1)
+            demo.queue().launch(server_name=host, server_port=port, inbrowser=open_browser)
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Crónicas Mundiales — Narration Studio Backend")
-    parser.add_argument("--port", type=int, default=8000, help="Puerto del servidor (por defecto 8000)")
-    parser.add_argument("--host", type=str, default="127.0.0.1", help="Host a escuchar (por defecto 127.0.0.1)")
-    parser.add_argument("--gradio-only", action="store_true", help="Lanzar únicamente la interfaz Gradio en lugar de la aplicación completa")
+    parser = argparse.ArgumentParser(description="Chatterbox Prime — AI Narration Studio")
+    parser.add_argument("--port", type=int, default=8000, help="Puerto del servidor HTTP")
+    parser.add_argument("--host", type=str, default="127.0.0.1", help="Host del servidor HTTP")
+    parser.add_argument("--gradio-only", action="store_true", help="Iniciar solo Gradio")
     parser.add_argument("--no-browser", action="store_true", help="No abrir automáticamente el navegador")
     args = parser.parse_args()
 

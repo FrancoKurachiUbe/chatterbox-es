@@ -1,5 +1,5 @@
 /**
- * Servicio de conexión HTTP con el Backend Python de Chatterbox ES
+ * Servicio de conexión HTTP con el Backend Python de Chatterbox Prime
  * Se comunica con los endpoints REST expuestos en multilingual_app.py
  */
 
@@ -11,6 +11,8 @@ export interface BackendStatus {
   model_status: string;
   t3_model: string;
   is_generating: boolean;
+  chatterbox_version?: string;
+  v3_compatible?: boolean;
 }
 
 export interface GenerationProgress {
@@ -25,19 +27,28 @@ export interface GenerationProgress {
 
 export interface VoiceOption {
   name: string;
+  filename: string;
   path: string;
+  url: string;
+  size_kb: number;
+  is_default: boolean;
 }
 
-export interface LanguageOption {
-  code: string;
-  name: string;
-  default_text: string;
-  audio_prompt: string;
+export interface ProjectSummary {
+  mode: string;
+  mode_label: string;
+  total_sections: number;
+  total_parts: number;
+  ready_parts: number;
+  pending_parts: number;
+  errors_count: number;
+  percent: number;
 }
 
 export interface ApiProjectResponse {
   project: any;
   panel: any[];
+  summary?: ProjectSummary;
   status_text: string;
   processing_mode: string;
 }
@@ -46,7 +57,6 @@ class BackendApiService {
   private baseUrl: string = '';
 
   constructor() {
-    // Si se corre directamente contra un backend en otro puerto en dev
     this.baseUrl = '';
   }
 
@@ -64,7 +74,7 @@ class BackendApiService {
         ...data,
         status: 'online',
       };
-    } catch (err) {
+    } catch {
       return {
         status: 'offline',
         device: 'desconocido',
@@ -80,7 +90,7 @@ class BackendApiService {
   async getProgress(): Promise<GenerationProgress> {
     try {
       const res = await fetch(`${this.baseUrl}/api/progress`);
-      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      if (!res.ok) throw new Error('Error al consultar progreso');
       return await res.json();
     } catch {
       return {
@@ -88,46 +98,52 @@ class BackendApiService {
         current_step: 0,
         total_steps: 0,
         current_label: '',
-        message: 'Inactivo',
+        message: 'Desconectado',
         errors: [],
       };
     }
   }
 
+  async cancelGeneration(): Promise<{ status: string; message: string }> {
+    const res = await fetch(`${this.baseUrl}/api/cancel`, { method: 'POST' });
+    return await res.json();
+  }
+
   async getVoices(): Promise<{ voices: VoiceOption[]; default_voice?: string }> {
     try {
       const res = await fetch(`${this.baseUrl}/api/voices`);
-      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      if (!res.ok) throw new Error('Error al obtener voces');
       return await res.json();
     } catch {
-      return {
-        voices: [{ name: 'Brian Warm Clonacion Voz', path: 'voices/Brian Warm Clonacion Voz.wav' }],
-        default_voice: 'Brian Warm Clonacion Voz',
-      };
+      return { voices: [] };
     }
   }
 
-  async getLanguages(): Promise<{ languages: LanguageOption[]; default_language: string }> {
-    try {
-      const res = await fetch(`${this.baseUrl}/api/languages`);
-      if (!res.ok) throw new Error(`HTTP ${res.status}`);
-      return await res.json();
-    } catch {
-      return {
-        languages: [{ code: 'es', name: 'Español', default_text: '', audio_prompt: '' }],
-        default_language: 'es',
-      };
-    }
+  async uploadVoice(file: File, name?: string): Promise<{ voices: VoiceOption[] }> {
+    const formData = new FormData();
+    formData.append('file', file);
+    if (name) formData.append('name', name);
+
+    const res = await fetch(`${this.baseUrl}/api/voices/upload`, {
+      method: 'POST',
+      body: formData,
+    });
+    if (!res.ok) throw new Error('Error al subir voz');
+    return await res.json();
   }
 
-  async getProject(mode: string = 'scene'): Promise<ApiProjectResponse | null> {
-    try {
-      const res = await fetch(`${this.baseUrl}/api/project?mode=${encodeURIComponent(mode)}`);
-      if (!res.ok) throw new Error(`HTTP ${res.status}`);
-      return await res.json();
-    } catch {
-      return null;
-    }
+  async deleteVoice(name: string): Promise<{ voices: VoiceOption[] }> {
+    const res = await fetch(`${this.baseUrl}/api/voices/${encodeURIComponent(name)}`, {
+      method: 'DELETE',
+    });
+    if (!res.ok) throw new Error('Error al eliminar voz');
+    return await res.json();
+  }
+
+  async getProject(mode: string = 'scene'): Promise<ApiProjectResponse> {
+    const res = await fetch(`${this.baseUrl}/api/project?mode=${encodeURIComponent(mode)}`);
+    if (!res.ok) throw new Error('Error al obtener datos del proyecto');
+    return await res.json();
   }
 
   async saveProject(payload: {
@@ -140,7 +156,7 @@ class BackendApiService {
     temperature: number;
     cfg_weight: number;
     seed: number;
-  }): Promise<{ status: string; project: any }> {
+  }): Promise<any> {
     const res = await fetch(`${this.baseUrl}/api/project`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -221,17 +237,56 @@ class BackendApiService {
     return await res.json();
   }
 
+  async regenerateFromHere(payload: {
+    processing_mode: string;
+    section_number: number;
+    part_number: number;
+    language: string;
+    audio_prompt_path?: string;
+    exaggeration: number;
+    temperature: number;
+    cfg_weight: number;
+    seed: number;
+  }): Promise<{ status: string; message: string }> {
+    const res = await fetch(`${this.baseUrl}/api/regenerate-from-here`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({ detail: 'Error al regenerar partes' }));
+      throw new Error(err.detail || 'Error en el servidor');
+    }
+    return await res.json();
+  }
+
   async joinSection(payload: {
     processing_mode: string;
     section_number: number;
   }): Promise<{ status: string; filename: string; audio_url: string }> {
-    const res = await fetch(`${this.baseUrl}/api/join`, {
+    const res = await fetch(`${this.baseUrl}/api/join-section`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(payload),
     });
     if (!res.ok) {
       const err = await res.json().catch(() => ({ detail: 'Error al unir sección' }));
+      throw new Error(err.detail || 'Error en el servidor');
+    }
+    return await res.json();
+  }
+
+  async joinAll(payload: {
+    processing_mode: string;
+    section_number: number;
+  }): Promise<{ status: string; filename: string; audio_url: string }> {
+    const res = await fetch(`${this.baseUrl}/api/join-all`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({ detail: 'Error al unir todo el audio' }));
       throw new Error(err.detail || 'Error en el servidor');
     }
     return await res.json();
