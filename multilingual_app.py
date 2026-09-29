@@ -2935,22 +2935,11 @@ with gr.Blocks(
     ):
 
         return (
-            gr.CheckboxGroup(
-                choices=get_selection_choices(
-                    new_mode
-                ),
-                value=[],
-                label="Seleccionar partes",
-                info=(
-                    "Seleccioná una o varias partes "
-                    "para regenerarlas juntas."
-                ),
-                interactive=True,
-                elem_classes="cm-selection"
+            gr.update(
+                choices=get_selection_choices(new_mode),
+                value=[]
             ),
-            get_project_status(
-                new_mode
-            ),
+            get_project_status(new_mode),
             0
         )
 
