@@ -1,0 +1,73 @@
+﻿# =========================
+# ENTORNO PYTHON
+# =========================
+.venv/
+venv/
+env/
+ENV/
+
+# =========================
+# PYTHON GENERADO
+# =========================
+__pycache__/
+*.py[cod]
+*.pyd
+*.egg-info/
+
+# =========================
+# MODELOS PESADOS
+# =========================
+*.safetensors
+*.ckpt
+*.pt
+*.pth
+*.bin
+*.onnx
+
+# =========================
+# AUDIO LOCAL / GENERADO
+# =========================
+*.wav
+*.mp3
+*.flac
+outputs/
+output/
+generated_audio/
+
+# =========================
+# ARCHIVOS TEMPORALES
+# =========================
+*.tmp
+*.temp
+*.log
+*.cache
+
+# =========================
+# GRADIO LOCAL
+# =========================
+.gradio/
+
+# =========================
+# JUPYTER
+# =========================
+.ipynb_checkpoints/
+
+# =========================
+# EDITORES
+# =========================
+.vscode/
+.idea/
+
+# =========================
+# SISTEMA
+# =========================
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# =========================
+# SECRETOS
+# =========================
+.env
+.env.*
+!.env.example
