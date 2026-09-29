@@ -190,7 +190,7 @@ def set_seed(seed: int):
     np.random.seed(seed)
 
 # ---------------------------------------------------------
-# PROJECT SAVE / LOAD
+# PROJECT / PROCESSING SYSTEM
 # ---------------------------------------------------------
 
 OUTPUTS_DIR = os.path.join(
@@ -203,12 +203,532 @@ PROJECT_FILE = os.path.join(
     "project.json"
 )
 
+SEGMENTS_DIR = os.path.join(
+    OUTPUTS_DIR,
+    "segments"
+)
+
 MAX_CHARS = 250
 DEFAULT_SEED = 737219296
 
 
+# =========================================================
+# TEXT SPLITTER
+# =========================================================
+
+def split_text_for_tts(
+    text: str,
+    max_chars: int = MAX_CHARS
+) -> list[str]:
+
+    text = text.strip()
+
+    if not text:
+        return []
+
+    sentences = re.findall(
+        r".+?(?:[.!?]+(?=\s|$)|$)",
+        text,
+        flags=re.DOTALL
+    )
+
+    chunks = []
+    current_chunk = ""
+
+    for sentence in sentences:
+
+        sentence = sentence.strip()
+
+        if not sentence:
+            continue
+
+        # -------------------------------------------------
+        # ORACIÓN DEMASIADO LARGA
+        # -------------------------------------------------
+
+        if len(sentence) > max_chars:
+
+            if current_chunk:
+                chunks.append(current_chunk.strip())
+                current_chunk = ""
+
+            words = sentence.split()
+            word_chunk = ""
+
+            for word in words:
+
+                candidate = (
+                    f"{word_chunk} {word}"
+                ).strip()
+
+                if len(candidate) <= max_chars:
+                    word_chunk = candidate
+
+                else:
+
+                    if word_chunk:
+                        chunks.append(
+                            word_chunk.strip()
+                        )
+
+                    word_chunk = word
+
+            if word_chunk:
+                chunks.append(
+                    word_chunk.strip()
+                )
+
+            continue
+
+        # -------------------------------------------------
+        # INTENTAR AGREGAR ORACIÓN
+        # -------------------------------------------------
+
+        candidate = (
+            f"{current_chunk} {sentence}"
+        ).strip()
+
+        if len(candidate) <= max_chars:
+
+            current_chunk = candidate
+
+        else:
+
+            if current_chunk:
+                chunks.append(
+                    current_chunk.strip()
+                )
+
+            current_chunk = sentence
+
+    if current_chunk:
+        chunks.append(
+            current_chunk.strip()
+        )
+
+    return chunks
+
+
+# =========================================================
+# NUMBER NORMALIZATION
+# =========================================================
+
+UNITS = [
+    "cero",
+    "uno",
+    "dos",
+    "tres",
+    "cuatro",
+    "cinco",
+    "seis",
+    "siete",
+    "ocho",
+    "nueve"
+]
+
+TEENS = {
+    10: "diez",
+    11: "once",
+    12: "doce",
+    13: "trece",
+    14: "catorce",
+    15: "quince",
+    16: "dieciséis",
+    17: "diecisiete",
+    18: "dieciocho",
+    19: "diecinueve"
+}
+
+TENS = {
+    20: "veinte",
+    30: "treinta",
+    40: "cuarenta",
+    50: "cincuenta",
+    60: "sesenta",
+    70: "setenta",
+    80: "ochenta",
+    90: "noventa"
+}
+
+HUNDREDS = {
+    100: "cien",
+    200: "doscientos",
+    300: "trescientos",
+    400: "cuatrocientos",
+    500: "quinientos",
+    600: "seiscientos",
+    700: "setecientos",
+    800: "ochocientos",
+    900: "novecientos"
+}
+
+
+def number_to_spanish(n: int) -> str:
+
+    if n < 10:
+        return UNITS[n]
+
+    if n in TEENS:
+        return TEENS[n]
+
+    if n < 30:
+
+        return (
+            "veinti"
+            + UNITS[n - 20]
+        )
+
+    if n < 100:
+
+        tens = (n // 10) * 10
+        units = n % 10
+
+        if units == 0:
+            return TENS[tens]
+
+        return (
+            f"{TENS[tens]} y "
+            f"{UNITS[units]}"
+        )
+
+    if n < 1000:
+
+        hundreds = (n // 100) * 100
+        remainder = n % 100
+
+        if n == 100:
+            return "cien"
+
+        prefix = HUNDREDS[hundreds]
+
+        if remainder == 0:
+            return prefix
+
+        return (
+            f"{prefix} "
+            f"{number_to_spanish(remainder)}"
+        )
+
+    if n < 2000:
+
+        remainder = n % 1000
+
+        if remainder == 0:
+            return "mil"
+
+        return (
+            f"mil "
+            f"{number_to_spanish(remainder)}"
+        )
+
+    if n < 1000000:
+
+        thousands = n // 1000
+        remainder = n % 1000
+
+        result = (
+            f"{number_to_spanish(thousands)} "
+            f"mil"
+        )
+
+        if remainder:
+            result += (
+                f" {number_to_spanish(remainder)}"
+            )
+
+        return result
+
+    # Para números extremadamente grandes,
+    # dejamos el número original.
+    return str(n)
+
+
+def normalize_numbers_for_tts(
+    text: str,
+    language_id: str
+) -> str:
+
+    if language_id != "es":
+        return text
+
+    def replace_number(match):
+
+        number = match.group(0)
+
+        try:
+            value = int(number)
+
+            if value > 999999:
+                return number
+
+            return number_to_spanish(value)
+
+        except Exception:
+            return number
+
+    return re.sub(
+        r"\b\d{1,6}\b",
+        replace_number,
+        text
+    )
+
+
+# =========================================================
+# PARAGRAPH PARSER
+# =========================================================
+
+def parse_paragraphs_from_script(
+    text_input: str
+) -> list[dict]:
+
+    text_input = (
+        text_input
+        .replace("\r\n", "\n")
+        .replace("\r", "\n")
+        .strip()
+    )
+
+    if not text_input:
+        raise ValueError(
+            "El guion está vacío."
+        )
+
+    paragraphs = re.split(
+        r"\n\s*\n",
+        text_input
+    )
+
+    result = []
+
+    number = 1
+
+    for paragraph in paragraphs:
+
+        paragraph = paragraph.strip()
+
+        if not paragraph:
+            continue
+
+        result.append({
+            "number": number,
+            "title": "",
+            "text": paragraph
+        })
+
+        number += 1
+
+    if not result:
+        raise ValueError(
+            "No se encontraron párrafos."
+        )
+
+    return result
+
+
+# =========================================================
+# SCENE PARSER
+# =========================================================
+
+def parse_scenes_from_script(
+    text_input: str
+) -> list[dict]:
+
+    text_input = (
+        text_input
+        .replace("\r\n", "\n")
+        .replace("\r", "\n")
+        .strip()
+    )
+
+    if not text_input:
+        raise ValueError(
+            "El guion está vacío."
+        )
+
+    lines = text_input.split("\n")
+
+    scene_pattern = re.compile(
+        r"^\s*ESCENA\s+(\d+)"
+        r"(?:\s*[—–:-]\s*(.*))?\s*$",
+        re.IGNORECASE
+    )
+
+    scenes = []
+
+    current_scene = None
+
+    content_before_first_scene = []
+
+    for line in lines:
+
+        match = scene_pattern.match(line)
+
+        if match:
+
+            if current_scene is not None:
+
+                current_scene["text"] = (
+                    "\n".join(
+                        current_scene["text_lines"]
+                    ).strip()
+                )
+
+                del current_scene["text_lines"]
+
+                scenes.append(
+                    current_scene
+                )
+
+            scene_number = int(
+                match.group(1)
+            )
+
+            scene_title = (
+                match.group(2) or ""
+            ).strip()
+
+            current_scene = {
+                "number": scene_number,
+                "title": scene_title,
+                "text_lines": []
+            }
+
+        else:
+
+            if current_scene is not None:
+
+                current_scene[
+                    "text_lines"
+                ].append(line)
+
+            elif line.strip():
+
+                content_before_first_scene.append(
+                    line.strip()
+                )
+
+    if current_scene is not None:
+
+        current_scene["text"] = (
+            "\n".join(
+                current_scene["text_lines"]
+            ).strip()
+        )
+
+        del current_scene["text_lines"]
+
+        scenes.append(
+            current_scene
+        )
+
+    if content_before_first_scene:
+
+        raise ValueError(
+            "Hay texto antes de la primera ESCENA. "
+            "El guion debe comenzar con "
+            "'ESCENA 1 — Título'."
+        )
+
+    if not scenes:
+
+        raise ValueError(
+            "No se encontraron escenas. "
+            "Usá el formato "
+            "'ESCENA 1 — Título'."
+        )
+
+    for scene in scenes:
+
+        if not scene["text"]:
+
+            raise ValueError(
+                f"La ESCENA "
+                f"{scene['number']} "
+                f"no tiene texto."
+            )
+
+    return scenes
+
+
+# =========================================================
+# BUILD PROJECT STRUCTURE
+# =========================================================
+
+def build_project_structure(
+    text_input: str,
+    processing_mode: str,
+    language_id: str
+):
+
+    if processing_mode == "scene":
+
+        sections = (
+            parse_scenes_from_script(
+                text_input
+            )
+        )
+
+    else:
+
+        sections = (
+            parse_paragraphs_from_script(
+                text_input
+            )
+        )
+
+    processed_sections = []
+
+    for section in sections:
+
+        normalized_text = (
+            normalize_numbers_for_tts(
+                section["text"],
+                language_id
+            )
+        )
+
+        parts = split_text_for_tts(
+            normalized_text,
+            max_chars=MAX_CHARS
+        )
+
+        processed_sections.append({
+
+            "number": section["number"],
+
+            "title": section.get(
+                "title",
+                ""
+            ),
+
+            "text": section["text"],
+
+            "normalized_text": normalized_text,
+
+            "parts": [
+
+                {
+                    "number": index + 1,
+                    "text": part
+                }
+
+                for index, part
+                in enumerate(parts)
+
+            ]
+
+        })
+
+    return processed_sections
+
+
+# =========================================================
+# SAVE PROJECT
+# =========================================================
+
 def save_project(
     text_input,
+    processing_mode,
     language_id,
     audio_prompt_path_input,
     exaggeration_input,
@@ -216,42 +736,57 @@ def save_project(
     seed_num_input,
     cfgw_input
 ):
-    os.makedirs(OUTPUTS_DIR, exist_ok=True)
 
-    scenes = parse_scenes_from_script(text_input)
+    os.makedirs(
+        OUTPUTS_DIR,
+        exist_ok=True
+    )
+
+    sections = build_project_structure(
+        text_input,
+        processing_mode,
+        language_id
+    )
 
     project = {
+
         "last_script": text_input,
+
+        "processing_mode": (
+            processing_mode
+        ),
+
         "settings": {
+
             "language": language_id,
-            "audio_prompt_path": audio_prompt_path_input,
-            "exaggeration": exaggeration_input,
-            "temperature": temperature_input,
-            "seed": seed_num_input,
-            "cfg_weight": cfgw_input,
+
+            "audio_prompt_path":
+                audio_prompt_path_input,
+
+            "exaggeration":
+                exaggeration_input,
+
+            "temperature":
+                temperature_input,
+
+            "seed":
+                seed_num_input,
+
+            "cfg_weight":
+                cfgw_input
+
         },
-        "scenes": []
+
+        "sections": sections
+
     }
 
-    for scene in scenes:
-        parts = split_text_for_tts(
-            scene["text"],
-            max_chars=MAX_CHARS
-        )
+    with open(
+        PROJECT_FILE,
+        "w",
+        encoding="utf-8"
+    ) as f:
 
-        project["scenes"].append({
-            "number": scene["number"],
-            "title": scene["title"],
-            "parts": [
-                {
-                    "number": index + 1,
-                    "text": part
-                }
-                for index, part in enumerate(parts)
-            ]
-        })
-
-    with open(PROJECT_FILE, "w", encoding="utf-8") as f:
         json.dump(
             project,
             f,
@@ -262,15 +797,20 @@ def save_project(
     return project
 
 
+# =========================================================
+# LOAD PROJECT
+# =========================================================
+
 def load_project():
-    """
-    Load the last saved project.
 
-    Returns None if no project exists yet.
-    """
+    if not os.path.exists(
+        PROJECT_FILE
+    ):
 
-    if not os.path.exists(PROJECT_FILE):
-        print("No saved project found.")
+        print(
+            "No saved project found."
+        )
+
         return None
 
     try:
@@ -284,7 +824,8 @@ def load_project():
             project = json.load(f)
 
         print(
-            f"Project loaded from: {PROJECT_FILE}"
+            f"Project loaded from: "
+            f"{PROJECT_FILE}"
         )
 
         return project
@@ -297,104 +838,349 @@ def load_project():
 
         return None
 
-    
-def resolve_audio_prompt(language_id: str, provided_path: str | None) -> str | None:
-    """
-    Decide which audio prompt to use:
-    - If user provided a path (upload/mic/url), use it.
-    - Else, fall back to language-specific default (if any).
-    """
-    if provided_path and str(provided_path).strip():
+
+# =========================================================
+# AUDIO PROMPT
+# =========================================================
+
+def resolve_audio_prompt(
+    language_id: str,
+    provided_path: str | None
+):
+
+    if (
+        provided_path
+        and str(provided_path).strip()
+    ):
+
         return provided_path
-    return LANGUAGE_CONFIG.get(language_id, {}).get("audio")
 
-
-def parse_scenes_from_script(text_input: str) -> list[dict]:
-    """
-    Detecta escenas con formato:
-    
-    ESCENA 1 — Título
-    Texto de la escena...
-
-    ESCENA 2 — Otro título
-    Texto de la escena...
-
-    El título nunca se envía a Chatterbox.
-    """
-    text_input = text_input.replace("\r\n", "\n").replace("\r", "\n").strip()
-
-    if not text_input:
-        raise ValueError("El guion está vacío.")
-
-    lines = text_input.split("\n")
-
-    scene_header_pattern = re.compile(
-        r"^\s*ESCENA\s+(\d+)(?:\s*[—–:-]\s*(.*))?\s*$",
-        re.IGNORECASE
+    return (
+        LANGUAGE_CONFIG
+        .get(language_id, {})
+        .get("audio")
     )
 
-    scenes = []
-    current_scene = None
-    content_before_first_scene = []
 
-    for line in lines:
-        match = scene_header_pattern.match(line)
+# =========================================================
+# FILE NAMING
+# =========================================================
 
-        if match:
-            if current_scene is not None:
-                current_scene["text"] = "\n".join(
-                    current_scene["text_lines"]
-                ).strip()
+def get_section_label(
+    processing_mode
+):
 
-                del current_scene["text_lines"]
-                scenes.append(current_scene)
+    if processing_mode == "scene":
+        return "Escena"
 
-            scene_number = int(match.group(1))
-            scene_title = (match.group(2) or "").strip()
+    return "Parrafo"
 
-            current_scene = {
-                "number": scene_number,
-                "title": scene_title,
-                "text_lines": []
-            }
 
-        else:
-            if current_scene is not None:
-                current_scene["text_lines"].append(line)
-            elif line.strip():
-                content_before_first_scene.append(line.strip())
+def get_section_filename(
+    processing_mode,
+    section_number,
+    part_number
+):
 
-    if current_scene is not None:
-        current_scene["text"] = "\n".join(
-            current_scene["text_lines"]
-        ).strip()
+    prefix = get_section_label(
+        processing_mode
+    )
 
-        del current_scene["text_lines"]
-        scenes.append(current_scene)
+    return (
+        f"{prefix}_"
+        f"{section_number:03d}_"
+        f"Parte_"
+        f"{part_number:02d}.wav"
+    )
 
-    if content_before_first_scene:
-        raise ValueError(
-            "Hay texto antes de la primera ESCENA. "
-            "El guion debe comenzar con 'ESCENA 1 — Título'."
+
+def get_section_path(
+    processing_mode,
+    section_number,
+    part_number
+):
+
+    filename = get_section_filename(
+        processing_mode,
+        section_number,
+        part_number
+    )
+
+    os.makedirs(
+        SEGMENTS_DIR,
+        exist_ok=True
+    )
+
+    return os.path.join(
+        SEGMENTS_DIR,
+        filename
+    )
+
+
+# =========================================================
+# GENERATE TTS
+# =========================================================
+
+def generate_tts_audio(
+    text_input: str,
+    processing_mode: str,
+    language_id: str,
+    audio_prompt_path_input: str = None,
+    exaggeration_input: float = 0.35,
+    temperature_input: float = 0.55,
+    seed_num_input: int = DEFAULT_SEED,
+    cfgw_input: float = 0.5
+):
+
+    current_model = (
+        get_or_load_model()
+    )
+
+    if current_model is None:
+
+        raise RuntimeError(
+            "TTS model is not loaded."
         )
 
-    if not scenes:
+    if (
+        not text_input
+        or not text_input.strip()
+    ):
+
         raise ValueError(
-            "No se encontraron escenas. "
-            "Usá el formato 'ESCENA 1 — Título'."
+            "No text was provided."
         )
 
-    for scene in scenes:
-        if not scene["text"]:
-            raise ValueError(
-                f"La ESCENA {scene['number']} no tiene texto."
+    project = save_project(
+
+        text_input=text_input,
+
+        processing_mode=
+            processing_mode,
+
+        language_id=language_id,
+
+        audio_prompt_path_input=
+            audio_prompt_path_input,
+
+        exaggeration_input=
+            exaggeration_input,
+
+        temperature_input=
+            temperature_input,
+
+        seed_num_input=
+            seed_num_input,
+
+        cfgw_input=
+            cfgw_input
+    )
+
+    sections = project[
+        "sections"
+    ]
+
+    chosen_prompt = (
+        resolve_audio_prompt(
+            language_id,
+            audio_prompt_path_input
+        )
+    )
+
+    generate_kwargs = {
+
+        "exaggeration":
+            float(exaggeration_input),
+
+        "temperature":
+            float(temperature_input),
+
+        "cfg_weight":
+            float(cfgw_input)
+
+    }
+
+    if chosen_prompt:
+
+        generate_kwargs[
+            "audio_prompt_path"
+        ] = chosen_prompt
+
+    fixed_seed = int(
+        seed_num_input
+    )
+
+    total_generated = 0
+    total_skipped = 0
+
+    print("")
+    print("=" * 60)
+    print(
+        f"MODO: "
+        f"{'ESCENAS' if processing_mode == 'scene' else 'PÁRRAFOS'}"
+    )
+    print("=" * 60)
+
+    for section in sections:
+
+        section_number = int(
+            section["number"]
+        )
+
+        parts = section[
+            "parts"
+        ]
+
+        title = section.get(
+            "title",
+            ""
+        )
+
+        label = get_section_label(
+            processing_mode
+        )
+
+        print("")
+        print("=" * 60)
+
+        if processing_mode == "scene":
+
+            print(
+                f"ESCENA "
+                f"{section_number}"
+                f" — {title}"
             )
 
-    return scenes
-    
-    
+        else:
+
+            print(
+                f"PÁRRAFO "
+                f"{section_number}"
+            )
+
+        print(
+            f"Partes: {len(parts)}"
+        )
+
+        print("=" * 60)
+
+        for part in parts:
+
+            part_number = int(
+                part["number"]
+            )
+
+            chunk = part["text"]
+
+            segment_path = (
+                get_section_path(
+                    processing_mode,
+                    section_number,
+                    part_number
+                )
+            )
+
+            filename = os.path.basename(
+                segment_path
+            )
+
+            if os.path.exists(
+                segment_path
+            ):
+
+                print(
+                    f"[YA EXISTE] "
+                    f"{filename}"
+                )
+
+                total_skipped += 1
+
+                continue
+
+            set_seed(
+                fixed_seed
+            )
+
+            print("")
+            print(
+                f"Generando "
+                f"{label} "
+                f"{section_number} "
+                f"Parte "
+                f"{part_number}/"
+                f"{len(parts)}"
+            )
+
+            print(
+                f"Characters: "
+                f"{len(chunk)}"
+            )
+
+            wav = (
+                current_model.generate(
+                    chunk,
+                    language_id=
+                        language_id,
+                    **generate_kwargs
+                )
+            )
+
+            audio = (
+                wav.squeeze(0)
+                .detach()
+                .cpu()
+                .numpy()
+                .astype(np.float32)
+            )
+
+            torchaudio.save(
+
+                segment_path,
+
+                torch.from_numpy(
+                    audio
+                ).unsqueeze(0),
+
+                current_model.sr
+
+            )
+
+            print(
+                f"[GUARDADO] "
+                f"{filename}"
+            )
+
+            total_generated += 1
+
+    print("")
+    print("=" * 60)
+    print("PROCESO COMPLETADO")
+    print("=" * 60)
+
+    print(
+        f"Audios nuevos: "
+        f"{total_generated}"
+    )
+
+    print(
+        f"Audios omitidos: "
+        f"{total_skipped}"
+    )
+
+    print(
+        f"Seed: {fixed_seed}"
+    )
+
+    return None
+
+
+# =========================================================
+# REGENERATE ONE PART
+# =========================================================
+
 def regenerate_tts_part(
-    paragraph_number,
+    processing_mode,
+    section_number,
     part_number,
     language_id,
     audio_prompt_path_input,
@@ -403,93 +1189,137 @@ def regenerate_tts_part(
     seed_num_input,
     cfgw_input
 ):
-    """
-    Regenera una única parte de audio.
-    Sobrescribe solamente el WAV seleccionado.
-    """
 
-    current_model = get_or_load_model()
-
-    if current_model is None:
-        raise RuntimeError("TTS model is not loaded.")
+    current_model = (
+        get_or_load_model()
+    )
 
     project = load_project()
 
     if not project:
-        raise ValueError("No hay ningún proyecto guardado.")
 
-    paragraph_number = int(paragraph_number)
-    part_number = int(part_number)
+        raise ValueError(
+            "No hay ningún proyecto guardado."
+        )
+
+    section_number = int(
+        section_number
+    )
+
+    part_number = int(
+        part_number
+    )
 
     selected_text = None
 
-    for paragraph in project.get("paragraphs", []):
+    for section in project.get(
+        "sections",
+        []
+    ):
 
-        if int(paragraph.get("number", 0)) == paragraph_number:
+        if int(
+            section.get(
+                "number",
+                0
+            )
+        ) == section_number:
 
-            for part in paragraph.get("parts", []):
+            for part in section.get(
+                "parts",
+                []
+            ):
 
-                if int(part.get("number", 0)) == part_number:
-                    selected_text = part.get("text")
+                if int(
+                    part.get(
+                        "number",
+                        0
+                    )
+                ) == part_number:
+
+                    selected_text = (
+                        part.get("text")
+                    )
+
                     break
 
             break
 
     if not selected_text:
+
         raise ValueError(
-            f"No se encontró el texto de "
-            f"Párrafo {paragraph_number}, Parte {part_number}."
+            "No se encontró el texto "
+            "seleccionado."
         )
 
-    segments_dir = os.path.join(
-        os.path.dirname(os.path.abspath(__file__)),
-        "outputs",
-        "segments"
-    )
-
-    os.makedirs(segments_dir, exist_ok=True)
-
-    filename = (
-        f"Parrafo_{paragraph_number:03d}_"
-        f"Parte_{part_number:02d}.wav"
-    )
-
-    segment_path = os.path.join(
-        segments_dir,
-        filename
+    segment_path = (
+        get_section_path(
+            processing_mode,
+            section_number,
+            part_number
+        )
     )
 
     chosen_prompt = (
-        audio_prompt_path_input
-        or default_audio_for_ui(language_id)
+        resolve_audio_prompt(
+            language_id,
+            audio_prompt_path_input
+        )
     )
 
     generate_kwargs = {
-        "exaggeration": float(exaggeration_input),
-        "temperature": float(temperature_input),
-        "cfg_weight": float(cfgw_input),
+
+        "exaggeration":
+            float(exaggeration_input),
+
+        "temperature":
+            float(temperature_input),
+
+        "cfg_weight":
+            float(cfgw_input)
+
     }
 
     if chosen_prompt:
-        generate_kwargs["audio_prompt_path"] = chosen_prompt
 
-    fixed_seed = int(seed_num_input)
+        generate_kwargs[
+            "audio_prompt_path"
+        ] = chosen_prompt
 
-    set_seed(fixed_seed)
+    fixed_seed = int(
+        seed_num_input
+    )
+
+    set_seed(
+        fixed_seed
+    )
 
     print("")
     print("=" * 60)
     print("REGENERANDO AUDIO")
     print("=" * 60)
-    print(f"Párrafo: {paragraph_number}")
-    print(f"Parte: {part_number}")
-    print(f"Seed: {fixed_seed}")
-    print(f"Texto: {selected_text}")
 
-    wav = current_model.generate(
-        selected_text,
-        language_id=language_id,
-        **generate_kwargs
+    print(
+        f"Modo: "
+        f"{processing_mode}"
+    )
+
+    print(
+        f"Sección: "
+        f"{section_number}"
+    )
+
+    print(
+        f"Parte: "
+        f"{part_number}"
+    )
+
+    wav = (
+        current_model.generate(
+            selected_text,
+            language_id=
+                language_id,
+            **generate_kwargs
+        )
     )
 
     audio = (
@@ -501,297 +1331,23 @@ def regenerate_tts_part(
     )
 
     torchaudio.save(
+
         segment_path,
-        torch.from_numpy(audio).unsqueeze(0),
+
+        torch.from_numpy(
+            audio
+        ).unsqueeze(0),
+
         current_model.sr
+
     )
 
-    print(f"[REGENERADO] {filename}")
+    print(
+        f"[REGENERADO] "
+        f"{os.path.basename(segment_path)}"
+    )
 
     return segment_path
-
-def test_split_text(text_input):
-    """
-    Prueba cómo split_text_for_tts() divide el texto.
-    No genera ningún audio.
-    """
-
-    if not text_input or not text_input.strip():
-        return "No se ingresó ningún texto."
-
-    chunks = split_text_for_tts(
-        text_input,
-        max_chars=MAX_CHARS
-    )
-
-    lines = []
-
-    lines.append("=" * 70)
-    lines.append("PRUEBA DE DIVISIÓN DEL TEXTO")
-    lines.append("=" * 70)
-    lines.append(f"Máximo por parte: {MAX_CHARS}")
-    lines.append(f"Total de partes: {len(chunks)}")
-    lines.append("")
-
-    for index, chunk in enumerate(chunks, start=1):
-
-        lines.append(
-            f"PARTE {index:02d} | "
-            f"{len(chunk)} caracteres"
-        )
-
-        lines.append(
-            f"Termina en: {repr(chunk[-30:])}"
-        )
-
-        lines.append(
-            f"Texto completo: {chunk}"
-        )
-
-        lines.append("-" * 70)
-
-    result = "\n".join(lines)
-
-    print("")
-    print(result)
-
-    return result
-
-def generate_tts_audio(
-    text_input: str,
-    language_id: str,
-    audio_prompt_path_input: str = None,
-    exaggeration_input: float = 0.35,
-    temperature_input: float = 0.55,
-    seed_num_input: int = 737219296,
-    cfgw_input: float = 0.5
-):
-    """
-    Generate one audio file per paragraph/part.
-
-    Paragraphs are separated by a blank line.
-    Each paragraph is divided into parts of approximately
-    250 characters maximum.
-
-    The same fixed seed is used for every part.
-
-    Existing audio files are skipped automatically.
-    """
-
-    current_model = get_or_load_model()
-
-    if current_model is None:
-        raise RuntimeError("TTS model is not loaded.")
-
-    if not text_input or not text_input.strip():
-        raise ValueError("No text was provided.")
-    
-    save_project(
-        text_input=text_input,
-        language_id=language_id,
-        seed=seed_num_input,
-        exaggeration=exaggeration_input,
-        temperature=temperature_input,
-        cfg_weight=cfgw_input
-    )
-
-    # ---------------------------------------------------------
-    # PARAGRAPH DETECTION
-    # Paragraphs are separated by a blank line
-    # ---------------------------------------------------------
-
-    normalized_text = text_input.replace("\r\n", "\n")
-
-    paragraphs = [
-        paragraph.strip()
-        for paragraph in normalized_text.split("\n\n")
-        if paragraph.strip()
-    ]
-
-    print(f"Total text: {len(text_input)} characters")
-    print(f"Total paragraphs: {len(paragraphs)}")
-    print("Maximum characters per part: 250")
-    print(f"Fixed seed: {seed_num_input}")
-
-    # ---------------------------------------------------------
-    # AUDIO PROMPT
-    # ---------------------------------------------------------
-
-    chosen_prompt = (
-        audio_prompt_path_input
-        or default_audio_for_ui(language_id)
-    )
-
-    generate_kwargs = {
-        "exaggeration": exaggeration_input,
-        "temperature": temperature_input,
-        "cfg_weight": cfgw_input,
-    }
-
-    if chosen_prompt:
-        generate_kwargs["audio_prompt_path"] = chosen_prompt
-        print(f"Using audio prompt: {chosen_prompt}")
-    else:
-        print("No audio prompt provided; using default voice.")
-
-    # ---------------------------------------------------------
-    # OUTPUT DIRECTORY
-    # ---------------------------------------------------------
-
-    segments_dir = os.path.join(
-        os.path.dirname(os.path.abspath(__file__)),
-        "outputs",
-        "segments"
-    )
-
-    os.makedirs(segments_dir, exist_ok=True)
-
-    # ---------------------------------------------------------
-    # FIXED SEED
-    # ---------------------------------------------------------
-
-    fixed_seed = int(seed_num_input)
-
-    print(f"Using fixed seed for all parts: {fixed_seed}")
-
-    # ---------------------------------------------------------
-    # PROCESS EACH PARAGRAPH
-    # ---------------------------------------------------------
-
-    total_generated = 0
-    total_skipped = 0
-
-    for paragraph_number, paragraph in enumerate(
-        paragraphs,
-        start=1
-    ):
-
-        # Split this paragraph into parts of max ~250 chars
-        parts = [
-            part.strip()
-            for part in split_text_for_tts(
-                paragraph,
-                max_chars=250
-            )
-            if part and part.strip()
-        ]
-
-        print("")
-        print("=" * 60)
-        print(
-            f"PÁRRAFO {paragraph_number}/{len(paragraphs)} "
-            f"- {len(parts)} parte(s)"
-        )
-        print("=" * 60)
-
-        # -----------------------------------------------------
-        # PROCESS EACH PART
-        # -----------------------------------------------------
-
-        for part_number, chunk in enumerate(
-            parts,
-            start=1
-        ):
-
-            # File name WITHOUT the seed
-            filename = (
-                f"Parrafo_{paragraph_number:03d}_"
-                f"Parte_{part_number:02d}.wav"
-            )
-
-            segment_path = os.path.join(
-                segments_dir,
-                filename
-            )
-
-            # -------------------------------------------------
-            # SKIP IF ALREADY EXISTS
-            # -------------------------------------------------
-
-            if os.path.exists(segment_path):
-
-                print(
-                    f"[YA EXISTE] "
-                    f"Parrafo {paragraph_number} "
-                    f"Parte {part_number}"
-                )
-
-                total_skipped += 1
-
-                continue
-
-            # -------------------------------------------------
-            # APPLY SAME SEED
-            # -------------------------------------------------
-
-            set_seed(fixed_seed)
-
-            print("")
-            print(
-                f"Generando "
-                f"Parrafo {paragraph_number}/{len(paragraphs)} "
-                f"Parte {part_number}/{len(parts)}"
-            )
-
-            print(f"Characters: {len(chunk)}")
-            print(f"Seed: {fixed_seed}")
-            print(f"Text: '{chunk[:100]}...'")
-
-            # -------------------------------------------------
-            # GENERATE AUDIO
-            # -------------------------------------------------
-
-            wav = current_model.generate(
-                chunk,
-                language_id=language_id,
-                **generate_kwargs
-            )
-
-            audio = (
-                wav.squeeze(0)
-                .detach()
-                .cpu()
-                .numpy()
-                .astype(np.float32)
-            )
-
-            # -------------------------------------------------
-            # SAVE AUDIO
-            # -------------------------------------------------
-
-            torchaudio.save(
-                segment_path,
-                torch.from_numpy(audio).unsqueeze(0),
-                current_model.sr
-            )
-
-            print(
-                f"[GUARDADO] "
-                f"{filename}"
-            )
-
-            total_generated += 1
-
-    # ---------------------------------------------------------
-    # FINISH
-    # ---------------------------------------------------------
-
-    print("")
-    print("=" * 60)
-    print("PROCESO COMPLETADO")
-    print("=" * 60)
-
-    print(f"Audios nuevos generados: {total_generated}")
-    print(f"Audios ya existentes omitidos: {total_skipped}")
-    print(f"Semilla utilizada: {fixed_seed}")
-    print(f"Carpeta: {segments_dir}")
-
-    return None
-
-
-# =========================================================
-# CRÓNICAS MUNDIALES — NARRATION STUDIO
-# =========================================================
 
 CUSTOM_CSS = """
 /* ===== GLOBAL ===== */
@@ -945,6 +1501,15 @@ with gr.Blocks(
 
     initial_lang = "es"
 
+    initial_processing_mode = (
+        saved_project.get(
+            "processing_mode",
+            "paragraph"
+        )
+        if saved_project
+        else "paragraph"
+    )
+
     initial_text = (
         saved_project.get("last_script")
         if saved_project and saved_project.get("last_script")
@@ -980,6 +1545,25 @@ with gr.Blocks(
         with gr.Column(scale=5):
 
             gr.HTML(
+    '<div class="cm-section-title">🎬 MODO DE PROCESAMIENTO</div>'
+)
+
+with gr.Group(elem_classes="cm-card"):
+
+            processing_mode = gr.Radio(
+                choices=[
+                    ("📄 Por párrafos", "paragraph"),
+                    ("🎬 Por escenas", "scene")
+                ],
+                value=initial_processing_mode
+                label="Cómo organizar el guion",
+                info=(
+                    "Por párrafos usa líneas en blanco. "
+                    "Por escenas usa encabezados ESCENA 1 — Título."
+                )
+            )
+
+            gr.HTML(
                 '<div class="cm-section-title">📝 GUION</div>'
             )
 
@@ -1000,8 +1584,12 @@ with gr.Blocks(
                 gr.Markdown(
                     """
                     <div class="cm-muted">
-                    Los párrafos deben separarse mediante una línea en blanco.
-                    El sistema divide automáticamente cada párrafo en partes.
+                        <b>Por párrafos:</b><br>
+                        Separá cada párrafo con una línea en blanco.<br><br>
+
+                        <b>Por escenas:</b><br>
+                        Usá el formato <b>ESCENA 1 — Título</b>.
+                        El título sirve para organizar el proyecto y no se envía a Chatterbox.
                     </div>
                     """
                 )
@@ -1217,6 +1805,7 @@ with gr.Blocks(
         fn=generate_tts_audio,
         inputs=[
             text,
+            processing_mode,
             language_id,
             ref_wav,
             exaggeration,
